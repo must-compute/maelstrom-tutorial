@@ -5,7 +5,7 @@ use node::Node;
 use std::io;
 
 fn main() {
-    let mut node = Node::new("", vec![]);
+    let node = Node::new("", vec![]);
 
     let mut input = String::new();
     let mut is_reading_stdin = true;
