@@ -1,7 +1,8 @@
 use crate::maelstrom;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub struct Node {
     pub id: RefCell<String>,
@@ -9,6 +10,17 @@ pub struct Node {
     pub neighbors: RefCell<Vec<String>>,
     messages: RefCell<HashSet<serde_json::Value>>,
     log_mutex: Mutex<()>,
+    periodic_tasks: RefCell<Vec<Arc<Mutex<Task>>>>,
+}
+
+// impl unsafe Send for Task {}
+// impl unsafe Sync for Task {}
+
+#[derive(Clone)]
+struct Task {
+    pub dt: Duration,
+    pub f: fn(),
+    // pub f: Box<dyn Fn()>,
 }
 
 impl Node {
@@ -19,6 +31,7 @@ impl Node {
             neighbors: RefCell::new(neighbors.into_iter().map(String::from).collect()),
             messages: RefCell::new(HashSet::new()),
             log_mutex: Mutex::new(()),
+            periodic_tasks: Default::default(),
         }
     }
 
@@ -35,6 +48,18 @@ impl Node {
                         in_reply_to: body.msg_id,
                     }),
                 );
+
+                let task = Task {
+                    dt: Duration::from_secs(5),
+                    f: || {
+                        eprintln!("work work");
+                    },
+                };
+
+                self.periodic_tasks
+                    .borrow_mut()
+                    .push(Arc::new(Mutex::new(task)));
+                self.schedule();
             }
             maelstrom::Body::InitOk(_body) => todo!(),
             maelstrom::Body::Echo(body) => {
@@ -132,5 +157,19 @@ impl Node {
         println!("{}", serde_json::to_string(&msg).unwrap());
         let updated_next_msg_id = self.next_msg_id.get() + 1;
         self.next_msg_id.set(updated_next_msg_id);
+    }
+
+    fn changeState(&self) {}
+
+    fn unchangedState(&self) {}
+
+    fn schedule(&self) {
+        // assume 5
+        for task in self.periodic_tasks.borrow_mut().iter().clone() {
+            std::thread::spawn(move || {
+                (task.get_mut().unwrap().f);
+                std::thread::sleep(task.get_mut().unwrap().dt);
+            });
+        }
     }
 }
