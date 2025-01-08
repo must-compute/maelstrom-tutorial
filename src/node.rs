@@ -10,17 +10,13 @@ pub struct Node {
     pub neighbors: RefCell<Vec<String>>,
     messages: RefCell<HashSet<serde_json::Value>>,
     log_mutex: Mutex<()>,
-    periodic_tasks: RefCell<Vec<Arc<Mutex<Task>>>>,
+    periodic_tasks: Arc<Mutex<Vec<Task>>>,
 }
-
-// impl unsafe Send for Task {}
-// impl unsafe Sync for Task {}
 
 #[derive(Clone)]
 struct Task {
     pub dt: Duration,
     pub f: fn(),
-    // pub f: Box<dyn Fn()>,
 }
 
 impl Node {
@@ -50,15 +46,16 @@ impl Node {
                 );
 
                 let task = Task {
-                    dt: Duration::from_secs(5),
+                    dt: Duration::from_millis(20),
                     f: || {
                         eprintln!("work work");
                     },
                 };
 
-                self.periodic_tasks
-                    .borrow_mut()
-                    .push(Arc::new(Mutex::new(task)));
+                // TODO find a better way
+                let tasks = self.periodic_tasks.clone();
+                let mut guard = tasks.lock().unwrap();
+                guard.push(task);
                 self.schedule();
             }
             maelstrom::Body::InitOk(_body) => todo!(),
@@ -159,16 +156,12 @@ impl Node {
         self.next_msg_id.set(updated_next_msg_id);
     }
 
-    fn changeState(&self) {}
-
-    fn unchangedState(&self) {}
-
     fn schedule(&self) {
-        // assume 5
-        for task in self.periodic_tasks.borrow_mut().iter().clone() {
+        let tasks = self.periodic_tasks.clone();
+        for task in tasks.lock().unwrap().iter().cloned() {
             std::thread::spawn(move || {
-                (task.get_mut().unwrap().f);
-                std::thread::sleep(task.get_mut().unwrap().dt);
+                (task.f);
+                std::thread::sleep(task.dt);
             });
         }
     }
