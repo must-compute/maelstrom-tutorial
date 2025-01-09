@@ -24,34 +24,31 @@ impl Node {
 
     pub fn handle(&self, msg: &maelstrom::Message) {
         match &msg.body {
-            maelstrom::Body::Init(body) => {
+            maelstrom::Body::Init { msg_id, .. } => {
                 *self.id.borrow_mut() = msg.dest.clone();
                 self.log(&format!("Initialized node {}", self.id.borrow()));
 
                 self.send(
                     &msg.src,
-                    &maelstrom::Body::InitOk(maelstrom::InitOkBody {
+                    &maelstrom::Body::InitOk {
                         msg_id: Some(self.next_msg_id.get()),
-                        in_reply_to: body.msg_id,
-                    }),
+                        in_reply_to: msg_id.clone(),
+                    },
                 );
             }
-            maelstrom::Body::InitOk(_body) => todo!(),
-            maelstrom::Body::Echo(body) => {
-                self.log(&format!("Echoing {:?}", body));
-
+            maelstrom::Body::InitOk { .. } => todo!(),
+            maelstrom::Body::Echo { msg_id, echo, .. } => {
                 self.send(
                     &msg.src,
-                    &maelstrom::Body::EchoOk(maelstrom::EchoOkBody {
+                    &maelstrom::Body::EchoOk {
                         msg_id: Some(self.next_msg_id.get()),
-                        in_reply_to: body.msg_id,
-                        echo: body.echo.clone(),
-                    }),
+                        in_reply_to: msg_id.clone(),
+                        echo: echo.clone(),
+                    },
                 );
             }
-            maelstrom::Body::Topology(body) => {
-                let neighbors = body
-                    .topology
+            maelstrom::Body::Topology { msg_id, topology } => {
+                let neighbors = topology
                     .get(&self.id.borrow().to_string())
                     .unwrap_or(&vec![])
                     .clone();
@@ -59,27 +56,24 @@ impl Node {
                 self.log(&format!("My neighbors are {:?}", self.neighbors));
                 self.send(
                     &msg.src,
-                    &maelstrom::Body::TopologyOk(maelstrom::TopologyOkBody {
+                    &maelstrom::Body::TopologyOk {
                         msg_id: Some(self.next_msg_id.get()),
-                        in_reply_to: body.msg_id,
-                    }),
+                        in_reply_to: msg_id.clone(),
+                    },
                 );
             }
-            broadcast_body @ maelstrom::Body::Broadcast(body) => {
+            broadcast_body @ maelstrom::Body::Broadcast { msg_id, message } => {
                 self.log(&format!("Received broadcast msg {:?}", broadcast_body));
 
                 // avoid re-broadcasting messages already seen by this node.
-                if self.messages.borrow().get(&body.message).is_some() {
+                if self.messages.borrow().get(message).is_some() {
                     self.log(&format!(
                         "I've seen and re-broadcasted this msg before. Wont re-broadcast.",
                     ));
                     return;
                 }
 
-                self.messages.borrow_mut().insert(body.message.clone());
-
-                let mut body_without_msg_id = body.clone();
-                body_without_msg_id.msg_id = None;
+                self.messages.borrow_mut().insert(message.clone());
 
                 self.log(&format!(
                     "Re-broadcasting to my neighbors: {:?}",
@@ -92,25 +86,25 @@ impl Node {
                 }
 
                 // TODO do we always return broadcast_ok?
-                if let Some(msg_id) = body.msg_id {
+                if let Some(msg_id) = msg_id {
                     self.send(
                         &msg.src,
-                        &maelstrom::Body::BroadcastOk(maelstrom::BroadcastOkBody {
+                        &maelstrom::Body::BroadcastOk {
                             msg_id: Some(self.next_msg_id.get()),
-                            in_reply_to: msg_id,
-                        }),
+                            in_reply_to: msg_id.clone(),
+                        },
                     );
                 }
             }
-            maelstrom::Body::BroadcastOk(_body) => {}
-            maelstrom::Body::Read(body) => {
+            maelstrom::Body::BroadcastOk { .. } => {}
+            maelstrom::Body::Read { msg_id } => {
                 self.send(
                     &msg.src,
-                    &maelstrom::Body::ReadOk(maelstrom::ReadOkBody {
+                    &maelstrom::Body::ReadOk {
                         msg_id: Some(self.next_msg_id.get()),
-                        in_reply_to: body.msg_id,
+                        in_reply_to: msg_id.clone(),
                         messages: self.messages.borrow().clone(),
-                    }),
+                    },
                 );
             }
             _ => panic!("no matching handler. got msg: {:?}", msg),
