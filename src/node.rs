@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 pub struct Node {
     pub id: RefCell<String>,
-    pub next_msg_id: Cell<u8>,
+    pub next_msg_id: Cell<usize>,
     pub neighbors: RefCell<Vec<String>>,
     messages: RefCell<HashSet<serde_json::Value>>,
     log_mutex: Mutex<()>,
