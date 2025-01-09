@@ -80,9 +80,12 @@ impl Node {
                     self.neighbors
                 ));
 
-                for node in self.neighbors.borrow().iter() {
-                    self.send(&node, broadcast_body);
-                    self.log(&format!("Re-broadcasted to neighbor: {:?}", node));
+                for neighbor in self.neighbors.borrow().iter() {
+                    if msg.src == *neighbor {
+                        continue;
+                    }
+                    self.send(&neighbor, broadcast_body);
+                    self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
                 }
 
                 // TODO do we always return broadcast_ok?
