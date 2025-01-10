@@ -80,13 +80,14 @@ impl Node {
                     self.neighbors
                 ));
 
-                for neighbor in self.neighbors.borrow().iter() {
-                    if msg.src == *neighbor {
-                        continue;
-                    }
-                    self.send(&neighbor, broadcast_body);
-                    self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
-                }
+                self.neighbors
+                    .borrow()
+                    .iter()
+                    .filter(|&neighbor| *neighbor != msg.src)
+                    .for_each(|neighbor| {
+                        self.send(neighbor, broadcast_body);
+                        self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
+                    });
 
                 // TODO do we always return broadcast_ok?
                 if let Some(msg_id) = msg_id {
