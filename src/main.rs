@@ -2,24 +2,26 @@ mod maelstrom;
 mod node;
 
 use node::Node;
-use std::io;
+use std::{io, sync::Arc, thread};
 
 fn main() {
-    let node = Node::new("", vec![]);
+    let node = Arc::new(Node::new("", vec![]));
 
     let mut input = String::new();
     let mut is_reading_stdin = true;
+    let mut handles = vec![];
     while is_reading_stdin {
         match io::stdin().read_line(&mut input) {
             Ok(_) => {
                 let j: Result<maelstrom::Message, serde_json::Error> = serde_json::from_str(&input);
-                match j {
+                let node = node.clone();
+                let handle = thread::spawn(move || match j {
                     Ok(msg) => {
-                        // let response = node.handle(&msg); println!("{}", serde_json::to_string(&response).unwrap());
                         node.handle(&msg);
                     }
                     Err(err) => println!("json error: {:?}", err),
-                }
+                });
+                handles.push(handle);
             }
             Err(error) => {
                 println!("readline error: {error}");
