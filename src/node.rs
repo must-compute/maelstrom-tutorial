@@ -1,7 +1,9 @@
 use crate::maelstrom;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct Node {
@@ -9,6 +11,7 @@ pub struct Node {
     pub next_msg_id: AtomicUsize,
     pub neighbors: RwLock<Vec<String>>,
     messages: Mutex<HashSet<serde_json::Value>>,
+    callbacks: Mutex<HashMap<usize, Box<dyn Fn(maelstrom::Message) + Send + 'static>>>,
     // log_mutex: Mutex<()>,
 }
 
@@ -86,6 +89,7 @@ impl Node {
                 //     self.neighbors
                 // ));
 
+                let unacked = Arc::new(Mutex::new(Vec::<String>::new()));
                 {
                     self.neighbors
                         .read()
@@ -93,12 +97,42 @@ impl Node {
                         .iter()
                         .filter(|&neighbor| *neighbor != msg.src)
                         .for_each(|neighbor| {
-                            self.send(neighbor, broadcast_body);
+                            unacked.lock().unwrap().push(neighbor.clone());
+                            // self.send(neighbor, broadcast_body);
                             // self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
                         });
                 }
 
+                let cloned_1 = unacked.clone();
+
+                loop {
+                    {
+                        let unacked_guard = cloned_1.lock().unwrap();
+                        eprintln!(
+                            "!!!!!!!!!!!!!!!!!! {} {:?}",
+                            unacked_guard.is_empty(),
+                            unacked_guard
+                        );
+                        if unacked_guard.is_empty() {
+                            break;
+                        }
+                        unacked_guard.iter().for_each(|dest| {
+                            let dest = dest.clone();
+
+                            let cloned_2 = unacked.clone();
+                            self.rpc(dest.clone(), broadcast_body, move |response| {
+                                if matches!(response.body, maelstrom::Body::BroadcastOk { .. }) {
+                                    let mut vec = cloned_2.lock().unwrap();
+                                    vec.retain(|node_name| *node_name != dest);
+                                }
+                            });
+                        });
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+
                 if let Some(msg_id) = msg_id {
+                    eprintln!("@@@@@@@@@ sending BroadcastOk to client");
                     self.send(
                         &msg.src,
                         &maelstrom::Body::BroadcastOk {
@@ -108,7 +142,13 @@ impl Node {
                     );
                 }
             }
-            maelstrom::Body::BroadcastOk { .. } => {}
+            maelstrom::Body::BroadcastOk { in_reply_to, .. } => {
+                let mut callbacks_guard = self.callbacks.lock().unwrap();
+                if let Some(cb) = callbacks_guard.get(in_reply_to) {
+                    cb(msg.clone());
+                    callbacks_guard.remove(in_reply_to);
+                };
+            }
             maelstrom::Body::Read { msg_id } => {
                 self.send(
                     &msg.src,
@@ -137,5 +177,18 @@ impl Node {
 
         println!("{}", serde_json::to_string(&msg).unwrap());
         self.next_msg_id.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn rpc(
+        &self,
+        dest: String,
+        body: &maelstrom::Body,
+        cb: (impl Fn(maelstrom::Message) + Send + 'static),
+    ) {
+        self.callbacks
+            .lock()
+            .unwrap()
+            .insert(self.next_msg_id.load(Ordering::SeqCst), Box::new(cb));
+        self.send(&dest, body);
     }
 }
