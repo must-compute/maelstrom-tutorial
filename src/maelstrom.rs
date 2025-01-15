@@ -55,3 +55,36 @@ pub enum Body {
     },
     Todo(serde_json::Value),
 }
+
+impl Body {
+    pub fn msg_id(&self) -> usize {
+        match self {
+            Body::Init { msg_id, .. } => *msg_id,
+            Body::InitOk { msg_id, .. } => msg_id.unwrap(),
+            Body::Echo { msg_id, .. } => *msg_id,
+            Body::EchoOk { msg_id, .. } => msg_id.unwrap(),
+            Body::Topology { msg_id, .. } => *msg_id,
+            Body::TopologyOk { msg_id, .. } => msg_id.unwrap(),
+            Body::Broadcast { msg_id, .. } => msg_id.unwrap(),
+            Body::BroadcastOk { msg_id, .. } => msg_id.unwrap(),
+            Body::Read { msg_id } => *msg_id,
+            Body::ReadOk { msg_id, .. } => msg_id.unwrap(),
+            Body::Todo(value) => todo!(),
+        }
+    }
+    pub fn set_msg_id(&mut self, new_id: usize) {
+        match self {
+            Body::Init { ref mut msg_id, .. } => *msg_id = new_id,
+            Body::InitOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::Echo { ref mut msg_id, .. } => *msg_id = new_id,
+            Body::EchoOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::Topology { ref mut msg_id, .. } => *msg_id = new_id,
+            Body::TopologyOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::Broadcast { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::BroadcastOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::Read { ref mut msg_id } => *msg_id = new_id,
+            Body::ReadOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::Todo(value) => todo!(),
+        };
+    }
+}
