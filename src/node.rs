@@ -21,6 +21,9 @@ impl Node {
     }
 
     pub fn handle(&self, msg: &maelstrom::Message) {
+        // TODO this is temporary
+        let log_prefix = format!("WHILE PROCESSING: {:?}, logged:\t", msg);
+
         match &msg.body {
             maelstrom::Body::Init { msg_id, .. } => {
                 {
@@ -57,10 +60,9 @@ impl Node {
                 {
                     let mut neighbors_guard = self.neighbors.write().unwrap();
                     *neighbors_guard = neighbors;
-                    // self.log(&format!("My neighbors are {:?}", self.neighbors));
+                    Self::log(&format!("My neighbors are {:?}", *neighbors_guard));
                 }
 
-                // start lock on logging
                 self.send(
                     &msg.src,
                     &maelstrom::Body::TopologyOk {
@@ -68,92 +70,11 @@ impl Node {
                         in_reply_to: msg_id.clone(),
                     },
                 );
-                //finish lock on logging
             }
             broadcast_body @ maelstrom::Body::Broadcast { msg_id, message } => {
-                Self::log(&format!("Received broadcast msg {:?}", broadcast_body));
-                {
-                    Self::log(&format!(
-                        "Current messages: {:?}",
-                        self.messages.lock().unwrap(),
-                    ));
-                }
-
-                {
-                    let mut messages_guard = self.messages.lock().unwrap();
-                    // avoid re-broadcasting messages already seen by this node.
-                    if messages_guard.get(message).is_some() {
-                        // self.log(&format!(
-                        //     "I've seen and re-broadcasted this msg before. Wont re-broadcast.",
-                        // ));
-                        return;
-                    }
-
-                    messages_guard.insert(message.clone());
-                    Self::log(&format!("Update messages: {:?}", messages_guard));
-                }
-
-                // self.log(&format!(
-                //     "Re-broadcasting to my neighbors: {:?}",
-                //     self.neighbors
-                // ));
-
-                let unacked = Arc::new(Mutex::new(Vec::<String>::new()));
-                {
-                    let mut unacked_guard = unacked.lock().unwrap();
-                    self.neighbors
-                        .read()
-                        .unwrap()
-                        .iter()
-                        .filter(|&neighbor| *neighbor != msg.src)
-                        .for_each(|neighbor| {
-                            unacked_guard.push(neighbor.clone());
-                            // self.send(neighbor, broadcast_body);
-                            // self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
-                        });
-                    Self::log(&format!("Initial unacked: {:?}", unacked_guard));
-                }
-
-                let cloned_1 = unacked.clone();
-
-                loop {
-                    {
-                        let unacked_guard = cloned_1.lock().unwrap();
-                        Self::log(&format!(
-                            "Unacked: empty? {}, {:?}",
-                            unacked_guard.is_empty(),
-                            unacked_guard
-                        ));
-                        if unacked_guard.is_empty() {
-                            Self::log("Unacked is empty, stop looping");
-                            break;
-                        }
-                        unacked_guard.iter().for_each(|dest| {
-                            let dest = dest.clone();
-
-                            let cloned_2 = unacked.clone();
-                            self.rpc(dest.clone(), broadcast_body, move |response| {
-                                Self::log(&format!("Received response from {}", response.src));
-                                if matches!(response.body, maelstrom::Body::BroadcastOk { .. }) {
-                                    let mut vec = cloned_2.lock().unwrap();
-                                    Self::log(&format!(
-                                        "Removing {} from unacked: {:?}",
-                                        dest, vec
-                                    ));
-                                    vec.retain(|node_name| *node_name != dest);
-                                    Self::log(&format!(
-                                        "Unacked after removing {}: {:?}",
-                                        dest, vec
-                                    ));
-                                }
-                            });
-                        });
-                    }
-                    thread::sleep(Duration::from_secs(1));
-                }
-
+                Self::log(&format!("{} Received broadcast msg {:?}", log_prefix, msg));
                 if let Some(msg_id) = msg_id {
-                    Self::log("Sending BroadcastOk to client");
+                    Self::log(&format!("{log_prefix} Sending BroadcastOk to client"));
                     self.send(
                         &msg.src,
                         &maelstrom::Body::BroadcastOk {
@@ -162,12 +83,114 @@ impl Node {
                         },
                     );
                 }
+                {
+                    Self::log(&format!(
+                        "{} Current messages: {:?}",
+                        log_prefix,
+                        self.messages.lock().unwrap(),
+                    ));
+                }
+
+                let mut messages_guard = self.messages.lock().unwrap();
+
+                // avoid re-broadcasting messages already seen by this node.
+                if messages_guard.get(message).is_none() {
+                    messages_guard.insert(message.clone());
+                    Self::log(&format!(
+                        "{} Update messages: {:?}",
+                        log_prefix, messages_guard
+                    ));
+                    drop(messages_guard);
+
+                    // self.log(&format!(
+                    //     "Re-broadcasting to my neighbors: {:?}",
+                    //     self.neighbors
+                    // ));
+
+                    let unacked = Arc::new(Mutex::new(Vec::<String>::new()));
+                    {
+                        let mut unacked_guard = unacked.lock().unwrap();
+                        self.neighbors
+                            .read()
+                            .unwrap()
+                            .iter()
+                            .filter(|&neighbor| {
+                                let cond = *neighbor != msg.src;
+                                if cond {
+                                    Self::log(&format!(
+                                        "{log_prefix} filter: keeping {neighbor} in unacked {:?}",
+                                        unacked
+                                    ));
+                                }
+                                cond
+                            })
+                            .for_each(|neighbor| {
+                                unacked_guard.push(neighbor.clone());
+                                // self.send(neighbor, broadcast_body);
+                                // self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
+                            });
+                        Self::log(&format!(
+                            "{log_prefix} Initial unacked: {:?}",
+                            unacked_guard
+                        ));
+                    }
+
+                    let cloned_1 = unacked.clone();
+
+                    let mut count = 0;
+                    loop {
+                        Self::log(&format!("{log_prefix} counter: {count}"));
+                        count += 1;
+                        {
+                            let unacked_guard = cloned_1.lock().unwrap();
+                            Self::log(&format!(
+                                "{log_prefix} Unacked: empty? {}, {:?}",
+                                unacked_guard.is_empty(),
+                                unacked_guard
+                            ));
+                            if unacked_guard.is_empty() {
+                                Self::log("{log_prefix} Unacked is empty, stop looping");
+                                break;
+                            }
+                            unacked_guard.iter().for_each(|dest| {
+                                let dest = dest.clone();
+
+                                let cloned_2 = unacked.clone();
+                                let msg = msg.clone();
+                                self.rpc(&log_prefix, dest.clone(), broadcast_body,  move |response| {
+                                    Self::log(&format!(
+                                        "WITHIN RPC: this RPC was spawned by {:?} and it received response {:?}",
+                                        msg,
+                                        response
+                                    ));
+                                    if matches!(response.body, maelstrom::Body::BroadcastOk { .. })
+                                    {
+                                        let mut vec = cloned_2.lock().unwrap();
+                                        Self::log(&format!(
+                                            "WITHIN RPC: this RPC was spawned by {:?}, and it is removing {} from current unacked {:?}",
+                                            msg, dest, vec
+                                        ));
+                                        vec.retain(|node_name| *node_name != dest);
+                                        Self::log(&format!(
+                                            "WITHIN RPC: this RPC was spawned by {:?}, and here is Unacked after removing {}: {:?}",
+                                            msg, dest, vec
+                                        ));
+                                    }
+                                });
+                            });
+                        }
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                }
             }
             maelstrom::Body::BroadcastOk { in_reply_to, .. } => {
                 let mut callbacks_guard = self.callbacks.lock().unwrap();
                 Self::log("Received BroadcastOk");
                 if let Some(cb) = callbacks_guard.get(in_reply_to) {
-                    Self::log(&format!("Executing callback for {}", in_reply_to));
+                    Self::log(&format!(
+                        "{log_prefix} Executing callback for {}",
+                        in_reply_to
+                    ));
                     cb(msg.clone());
                     callbacks_guard.remove(in_reply_to);
                 };
@@ -187,6 +210,7 @@ impl Node {
     }
 
     fn send(&self, dest: &str, body: &maelstrom::Body) {
+        Self::log(&format!("entering send"));
         let msg_id = self.next_msg_id.load(Ordering::SeqCst);
         let mut body = body.clone();
         body.set_msg_id(msg_id);
@@ -198,29 +222,37 @@ impl Node {
         };
 
         println!("{}", serde_json::to_string(&msg).unwrap());
+        Self::log(&format!("printed"));
         self.next_msg_id.fetch_add(1, Ordering::SeqCst);
+        Self::log(&format!("incremented next_msg_id"));
     }
 
     fn rpc(
         &self,
+        log_prefix: &str,
         dest: String,
         body: &maelstrom::Body,
         cb: (impl Fn(maelstrom::Message) + Send + 'static),
     ) {
-        Self::log(&format!("Sending RPC call to {}", dest));
-        self.callbacks
-            .lock()
-            .unwrap()
-            .insert(self.next_msg_id.load(Ordering::SeqCst), Box::new(cb));
+        Self::log(&format!("{log_prefix} Sending RPC call to {}", dest));
+        {
+            self.callbacks
+                .lock()
+                .unwrap()
+                .insert(self.next_msg_id.load(Ordering::SeqCst), Box::new(cb));
+        }
+        Self::log(&format!("{log_prefix} after inserting callbacks"));
         self.send(&dest, body);
+        Self::log(&format!("{log_prefix} after sending"));
     }
 
     fn log(s: &str) {
-        {
-            let mut guard = std::io::stderr().lock();
-            guard
-                .write_all(format!("aaaaaaaaaaaaaa {}\n", s).as_bytes())
-                .unwrap();
-        }
+        eprintln!("{}", s);
+        // {
+        //     let mut guard = std::io::stderr().lock();
+        //     guard
+        //         .write_all(format!("aaaaaaaaaaaaaa {}\n", s).as_bytes())
+        //         .unwrap();
+        // }
     }
 }
