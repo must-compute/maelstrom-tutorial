@@ -1,6 +1,5 @@
 mod maelstrom;
 mod node;
-mod node2;
 
 use node::Node;
 use std::{io, sync::Arc, thread};

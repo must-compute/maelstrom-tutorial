@@ -1,23 +1,32 @@
 use crate::maelstrom;
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-#[derive(Default)]
 pub struct Node {
     pub id: RwLock<String>,
     pub next_msg_id: AtomicUsize,
     pub neighbors: RwLock<Vec<String>>,
     messages: Mutex<HashSet<serde_json::Value>>,
     callbacks: Mutex<HashMap<usize, Box<dyn Fn(maelstrom::Message) + Send + 'static>>>,
+    unacked_tx: mpsc::Sender<usize>,
+    unacked_rx: mpsc::Receiver<usize>,
 }
 
 impl Node {
     pub fn new() -> Self {
-        Default::default()
+        let (unacked_tx, unacked_rx) = mpsc::channel();
+        Self {
+            id: Default::default(),
+            next_msg_id: Default::default(),
+            neighbors: Default::default(),
+            messages: Default::default(),
+            callbacks: Default::default(),
+            unacked_tx,
+            unacked_rx,
+        }
     }
 
     pub fn handle(&self, msg: &maelstrom::Message) {
