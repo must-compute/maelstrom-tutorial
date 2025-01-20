@@ -73,6 +73,7 @@ impl Node {
             }
             broadcast_body @ maelstrom::Body::Broadcast { msg_id, message } => {
                 Self::log(&format!("{} Received broadcast msg {:?}", log_prefix, msg));
+
                 if let Some(msg_id) = msg_id {
                     Self::log(&format!("{log_prefix} Sending BroadcastOk to client"));
                     self.send(
@@ -83,6 +84,7 @@ impl Node {
                         },
                     );
                 }
+
                 {
                     Self::log(&format!(
                         "{} Current messages: {:?}",
@@ -91,9 +93,9 @@ impl Node {
                     ));
                 }
 
-                let mut messages_guard = self.messages.lock().unwrap();
-
                 // avoid re-broadcasting messages already seen by this node.
+                let mut message_is_new = false;
+                let mut messages_guard = self.messages.lock().unwrap();
                 if messages_guard.get(message).is_none() {
                     messages_guard.insert(message.clone());
                     Self::log(&format!(
@@ -102,61 +104,59 @@ impl Node {
                     ));
                     drop(messages_guard);
 
-                    // self.log(&format!(
-                    //     "Re-broadcasting to my neighbors: {:?}",
-                    //     self.neighbors
-                    // ));
+                    message_is_new = true;
+                }
 
+                // self.log(&format!(
+                //     "Re-broadcasting to my neighbors: {:?}",
+                //     self.neighbors
+                // ));
+
+                if message_is_new {
                     let unacked = Arc::new(Mutex::new(Vec::<String>::new()));
-                    {
-                        let mut unacked_guard = unacked.lock().unwrap();
-                        self.neighbors
-                            .read()
-                            .unwrap()
-                            .iter()
-                            .filter(|&neighbor| {
-                                let cond = *neighbor != msg.src;
-                                if cond {
-                                    Self::log(&format!(
-                                        "{log_prefix} filter: keeping {neighbor} in unacked {:?}",
-                                        unacked
-                                    ));
-                                }
-                                cond
-                            })
-                            .for_each(|neighbor| {
-                                unacked_guard.push(neighbor.clone());
-                                // self.send(neighbor, broadcast_body);
-                                // self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
-                            });
-                        Self::log(&format!(
-                            "{log_prefix} Initial unacked: {:?}",
-                            unacked_guard
-                        ));
-                    }
-
-                    let cloned_1 = unacked.clone();
+                    let mut unacked_guard = unacked.lock().unwrap();
+                    self.neighbors
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .filter(|&neighbor| {
+                            let cond = *neighbor != msg.src;
+                            if cond {
+                                Self::log(&format!(
+                                    "{log_prefix} filter: keeping {neighbor} in unacked {:?}",
+                                    unacked
+                                ));
+                            }
+                            cond
+                        })
+                        .for_each(|neighbor| {
+                            unacked_guard.push(neighbor.clone());
+                            // self.send(neighbor, broadcast_body);
+                            // self.log(&format!("Re-broadcasted to neighbor: {:?}", neighbor));
+                        });
+                    Self::log(&format!(
+                        "{log_prefix} Initial unacked: {:?}",
+                        unacked_guard
+                    ));
+                    drop(unacked_guard);
 
                     let mut count = 0;
                     loop {
-                        Self::log(&format!("{log_prefix} counter: {count}"));
-                        count += 1;
-                        {
-                            let unacked_guard = cloned_1.lock().unwrap();
-                            Self::log(&format!(
-                                "{log_prefix} Unacked: empty? {}, {:?}",
-                                unacked_guard.is_empty(),
-                                unacked_guard
-                            ));
-                            if unacked_guard.is_empty() {
-                                Self::log("{log_prefix} Unacked is empty, stop looping");
-                                break;
-                            }
-                            unacked_guard.iter().for_each(|dest| {
-                                let dest = dest.clone();
+                        let unacked_clone = unacked.lock().unwrap().clone();
+                        Self::log(&format!(
+                            "{log_prefix} Unacked: empty? {}, {:?}",
+                            unacked_clone.is_empty(),
+                            unacked_clone
+                        ));
+                        if unacked_clone.is_empty() {
+                            Self::log("{log_prefix} Unacked is empty, stop looping");
+                            break;
+                        }
 
-                                let cloned_2 = unacked.clone();
+                        unacked_clone.into_iter().for_each(|dest| {
                                 let msg = msg.clone();
+                                let unacked = unacked.clone();
+
                                 self.rpc(&log_prefix, dest.clone(), broadcast_body,  move |response| {
                                     Self::log(&format!(
                                         "WITHIN RPC: this RPC was spawned by {:?} and it received response {:?}",
@@ -165,7 +165,7 @@ impl Node {
                                     ));
                                     if matches!(response.body, maelstrom::Body::BroadcastOk { .. })
                                     {
-                                        let mut vec = cloned_2.lock().unwrap();
+                                        let mut vec = unacked.lock().unwrap();
                                         Self::log(&format!(
                                             "WITHIN RPC: this RPC was spawned by {:?}, and it is removing {} from current unacked {:?}",
                                             msg, dest, vec
@@ -178,22 +178,36 @@ impl Node {
                                     }
                                 });
                             });
-                        }
                         thread::sleep(Duration::from_secs(1));
+                        count = count + 1;
+                        Self::log(&format!("COUNT IS NOW: {count}"));
                     }
                 }
             }
             maelstrom::Body::BroadcastOk { in_reply_to, .. } => {
-                let mut callbacks_guard = self.callbacks.lock().unwrap();
-                Self::log("Received BroadcastOk");
-                if let Some(cb) = callbacks_guard.get(in_reply_to) {
-                    Self::log(&format!(
-                        "{log_prefix} Executing callback for {}",
-                        in_reply_to
-                    ));
-                    cb(msg.clone());
-                    callbacks_guard.remove(in_reply_to);
-                };
+                loop {
+                    if let Ok(mut callbacks_guard) = self.callbacks.try_lock() {
+                        Self::log("Received BroadcastOk");
+                        if let Some(cb) = callbacks_guard.get(in_reply_to) {
+                            Self::log(&format!(
+                                "{log_prefix} Executing callback for {}",
+                                in_reply_to
+                            ));
+                            cb(msg.clone());
+                            // callbacks_guard.remove(in_reply_to);
+                            let removed = callbacks_guard.remove(in_reply_to);
+                            if removed.is_none() {
+                                Self::log(&format!(
+                                    "CALLBACK in reply to {in_reply_to} NOT FOUND FOR REMOVAL"
+                                ));
+                            }
+                        };
+                        break;
+                    } else {
+                        // Self::log(&format!("SPINNING DETECTED in reply to {in_reply_to}"));
+                        // thread::sleep(Duration::(5));
+                    }
+                }
             }
             maelstrom::Body::Read { msg_id } => {
                 self.send(
@@ -210,7 +224,7 @@ impl Node {
     }
 
     fn send(&self, dest: &str, body: &maelstrom::Body) {
-        Self::log(&format!("entering send"));
+        Self::log(&format!("entering send for {dest} and msg body {:?}", body));
         let msg_id = self.next_msg_id.load(Ordering::SeqCst);
         let mut body = body.clone();
         body.set_msg_id(msg_id);
@@ -218,13 +232,16 @@ impl Node {
         let msg = maelstrom::Message {
             src: self.id.read().unwrap().clone(),
             dest: dest.to_string(),
-            body,
+            body: body.clone(),
         };
 
         println!("{}", serde_json::to_string(&msg).unwrap());
-        Self::log(&format!("printed"));
+        Self::log(&format!("printed send for {dest} and msg body {:?}", body));
         self.next_msg_id.fetch_add(1, Ordering::SeqCst);
-        Self::log(&format!("incremented next_msg_id"));
+        Self::log(&format!(
+            "incremented next msg id send for {dest} and msg body {:?}",
+            body
+        ));
     }
 
     fn rpc(
@@ -236,18 +253,27 @@ impl Node {
     ) {
         Self::log(&format!("{log_prefix} Sending RPC call to {}", dest));
         {
-            self.callbacks
-                .lock()
-                .unwrap()
-                .insert(self.next_msg_id.load(Ordering::SeqCst), Box::new(cb));
+            let callbacks = self.callbacks.lock();
+            Self::log(&format!(
+                "{log_prefix} CALLBACK LOCK ACQUIRED. TRYING TO UNWRAP"
+            ));
+            if let Ok(mut guard) = callbacks {
+                guard.insert(self.next_msg_id.load(Ordering::SeqCst), Box::new(cb));
+                Self::log(&format!("{log_prefix} CALLBACK INSERTED"));
+            } else {
+                Self::log(&format!(
+                    "{log_prefix} POISON when acquiring callbacks lock"
+                ));
+            }
         }
         Self::log(&format!("{log_prefix} after inserting callbacks"));
+
         self.send(&dest, body);
         Self::log(&format!("{log_prefix} after sending"));
     }
 
     fn log(s: &str) {
-        eprintln!("{}", s);
+        eprintln!("{} | THREAD ID: {:?}", s, thread::current().id());
         // {
         //     let mut guard = std::io::stderr().lock();
         //     guard
