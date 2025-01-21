@@ -1,6 +1,5 @@
 mod maelstrom;
 mod node;
-mod node2;
 
 use node::Node;
 use std::{io, sync::Arc, thread};
@@ -11,6 +10,12 @@ fn main() {
     let mut input = String::new();
     let mut is_reading_stdin = true;
     while is_reading_stdin {
+        // multi-producer, single consumer
+        // consumer:  the retry thread
+        //               consumes: NewMsg(Message) or RemoveUnacked(MessageID)
+        // producer 1: handle broadcast : sends NewMsg
+        // producer 2: handle broadcast_ok: sends remove unacked
+
         match io::stdin().read_line(&mut input) {
             Ok(_) => {
                 let j: Result<maelstrom::Message, serde_json::Error> = serde_json::from_str(&input);
