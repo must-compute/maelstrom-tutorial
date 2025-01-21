@@ -69,7 +69,7 @@ impl Body {
             Body::BroadcastOk { msg_id, .. } => msg_id.unwrap(),
             Body::Read { msg_id } => *msg_id,
             Body::ReadOk { msg_id, .. } => msg_id.unwrap(),
-            Body::Todo(value) => todo!(),
+            Body::Todo(_) => todo!(),
         }
     }
     pub fn set_msg_id(&mut self, new_id: usize) {
@@ -84,7 +84,7 @@ impl Body {
             Body::BroadcastOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
             Body::Read { ref mut msg_id } => *msg_id = new_id,
             Body::ReadOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
-            Body::Todo(value) => todo!(),
+            Body::Todo(_) => todo!(),
         };
     }
 }
