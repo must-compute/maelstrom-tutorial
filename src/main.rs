@@ -10,23 +10,26 @@ fn main() {
     let mut input = String::new();
     let mut is_reading_stdin = true;
     while is_reading_stdin {
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
-                let j: Result<maelstrom::Message, serde_json::Error> = serde_json::from_str(&input);
-                let node = node.clone();
+        io::stdin()
+            .read_line(&mut input)
+            .or_else(|e| {
+                is_reading_stdin = false;
+                Err(e)
+            })
+            .expect("read_line should succeed");
 
-                thread::spawn(move || match j {
-                    Ok(msg) => {
+        serde_json::from_str(&input)
+            .and_then(|msg| {
+                thread::spawn({
+                    let node = node.clone();
+                    move || {
                         node.handle(&msg);
                     }
-                    Err(err) => println!("json error: {:?}", err),
                 });
-            }
-            Err(error) => {
-                println!("readline error: {error}");
-                is_reading_stdin = false;
-            }
-        }
+                Ok(())
+            })
+            .expect("reading input as JSON should succeed");
+
         input.clear();
     }
 }
