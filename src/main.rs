@@ -4,7 +4,8 @@ mod node;
 use node::Node;
 use std::{io, sync::Arc, thread};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let node = Arc::new(Node::new());
 
     let mut input = String::new();
