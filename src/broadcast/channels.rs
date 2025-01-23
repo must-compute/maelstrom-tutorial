@@ -2,8 +2,8 @@ use crate::maelstrom;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
-use std::thread;
 use std::time::Duration;
+use std::{io, thread};
 
 enum RetryMessage {
     Retry(maelstrom::Message),
@@ -218,5 +218,30 @@ impl Node {
 
     fn log(s: &str) {
         eprintln!("{} | THREAD ID: {:?}", s, thread::current().id());
+    }
+}
+
+pub fn run() {
+    let node = Arc::new(Node::new());
+
+    let mut input = String::new();
+    let mut is_reading_stdin = true;
+
+    while is_reading_stdin {
+        if let Err(e) = io::stdin().read_line(&mut input) {
+            println!("readline error: {e}");
+            is_reading_stdin = false;
+        }
+
+        let json_msg = serde_json::from_str(&input).expect("should take a JSON message");
+
+        thread::spawn({
+            let node = node.clone();
+            move || {
+                node.handle(&json_msg);
+            }
+        });
+
+        input.clear();
     }
 }
