@@ -1,4 +1,5 @@
-use crate::maelstrom;
+use crate::maelstrom::{self, Message};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
@@ -16,7 +17,8 @@ pub struct Node {
     pub next_msg_id: AtomicUsize,
     pub neighbors: RwLock<Vec<String>>,
     messages: Mutex<HashSet<serde_json::Value>>,
-    retry_tx: OnceLock<mpsc::Sender<RetryMessage>>,
+    // retry_tx: OnceLock<mpsc::Sender<RetryMessage>>,
+    unacked: Mutex<Vec<Message>>,
 }
 
 impl Node {
@@ -24,7 +26,7 @@ impl Node {
         Default::default()
     }
 
-    pub fn handle(self: Arc<Self>, msg: &maelstrom::Message) {
+    pub async fn handle(self: Arc<Self>, msg: &maelstrom::Message) {
         // TODO this is temporary
         let log_prefix = format!("WHILE PROCESSING: {:?}, logged:\t", msg);
 
@@ -45,40 +47,41 @@ impl Node {
                 );
 
                 //////
-                let (retry_tx, retry_rx) = mpsc::channel();
-                self.retry_tx.get_or_init(|| retry_tx);
+                // let (retry_tx, retry_rx) = mpsc::channel();
+                // self.retry_tx.get_or_init(|| retry_tx);
 
-                thread::scope(move |s| {
-                    // thread::spawn(move || {
-                    let unacked: Arc<Mutex<Vec<maelstrom::Message>>> =
-                        Arc::new(Mutex::new(Vec::new()));
+                // thread::scope(move |s| {
+                //     // thread::spawn(move || {
+                //     let unacked: Arc<Mutex<Vec<maelstrom::Message>>> =
+                //         Arc::new(Mutex::new(Vec::new()));
 
-                    s.spawn({
-                        // thread::spawn({
-                        let unacked = unacked.clone();
-                        move || loop {
-                            match retry_rx.recv() {
-                                Ok(RetryMessage::Retry(msg)) => unacked.lock().unwrap().push(msg),
-                                Ok(RetryMessage::StopRetry(msg_id)) => unacked
-                                    .lock()
-                                    .unwrap()
-                                    .retain(|msg| msg.body.msg_id() != msg_id),
-                                Err(_) => todo!(),
-                            }
-                        }
-                    });
+                //     s.spawn({
+                //         // thread::spawn({
+                //         let unacked = unacked.clone();
+                //         move || loop {
+                //             match retry_rx.recv() {
+                //                 Ok(RetryMessage::Retry(msg)) => unacked.lock().unwrap().push(msg),
+                //                 Ok(RetryMessage::StopRetry(msg_id)) => unacked
+                //                     .lock()
+                //                     .unwrap()
+                //                     .retain(|msg| msg.body.msg_id() != msg_id),
+                //                 Err(_) => todo!(),
+                //             }
+                //         }
+                //     });
 
-                    s.spawn({
-                        // thread::spawn({
-                        let unacked = unacked.clone();
-                        move || loop {
-                            unacked.lock().unwrap().iter().for_each(|msg| {
-                                self.send_reserved(msg);
-                            });
-                            thread::sleep(Duration::from_secs(1));
-                        }
-                    });
-                });
+                //     s.spawn({
+
+                //         // thread::spawn({
+                //         let unacked = unacked.clone();
+                //         move || loop {
+                //             unacked.lock().unwrap().iter().for_each(|msg| {
+                //                 self.send_reserved(msg);
+                //             });
+                //             thread::sleep(Duration::from_secs(1));
+                //         }
+                //     });
+                // });
             }
             maelstrom::Body::InitOk { .. } => todo!(),
             maelstrom::Body::Echo { msg_id, echo, .. } => {
@@ -149,32 +152,54 @@ impl Node {
 
                 if message_is_new {
                     let new_broadcast_src = self.id.read().unwrap();
-                    self.neighbors
+                    let neighbors: Vec<String> = self
+                        .neighbors
                         .read()
                         .unwrap()
                         .iter()
                         .filter(|&neighbor| *neighbor != msg.src)
-                        .for_each(|neighbor| {
-                            let mut neighbor_broadcast_msg = msg.clone();
-                            neighbor_broadcast_msg.src = new_broadcast_src.clone();
-                            neighbor_broadcast_msg.dest = neighbor.clone();
-                            let msg_id = self.next_msg_id.fetch_add(1, Ordering::SeqCst);
-                            neighbor_broadcast_msg.body.set_msg_id(msg_id);
+                        .cloned()
+                        .collect();
 
-                            self.retry_tx
-                                .get()
-                                .unwrap()
-                                .send(RetryMessage::Retry(neighbor_broadcast_msg))
-                                .unwrap();
-                        });
+                    for neighbor in neighbors {
+                        let mut neighbor_broadcast_msg = msg.clone();
+                        neighbor_broadcast_msg.src = new_broadcast_src.clone();
+                        neighbor_broadcast_msg.dest = neighbor;
+                        let msg_id = self.next_msg_id.fetch_add(1, Ordering::SeqCst);
+                        neighbor_broadcast_msg.body.set_msg_id(msg_id);
+
+                        self.unacked
+                            .lock()
+                            .unwrap()
+                            .push(neighbor_broadcast_msg.clone());
+
+                        let self_clone = self.clone();
+                        tokio::spawn(
+                            async move { self_clone.retry(&neighbor_broadcast_msg).await },
+                        );
+                    }
+
+                    // for m in self.unacked.borrow().iter() {
+                    //     self.retry(&m).await
+                    // }
+                    // });
                 }
             }
             maelstrom::Body::BroadcastOk { in_reply_to, .. } => {
-                self.retry_tx
-                    .get()
+                Self::log(&format!(
+                    "about to lock unacked in broadcast_ok handler in reply to {in_reply_to}"
+                ));
+                self.unacked
+                    .lock()
                     .unwrap()
-                    .send(RetryMessage::StopRetry(*in_reply_to))
-                    .unwrap();
+                    .retain(|msg| msg.body.msg_id() != *in_reply_to);
+
+                Self::log(&format!("stop retry for msg id {in_reply_to}"));
+                // self.retry_tx
+                //     .get()
+                //     .unwrap()
+                //     .send(RetryMessage::StopRetry(*in_reply_to))
+                //     .unwrap();
             }
             maelstrom::Body::Read { msg_id } => {
                 self.send(
@@ -218,5 +243,21 @@ impl Node {
 
     fn log(s: &str) {
         eprintln!("{} | THREAD ID: {:?}", s, thread::current().id());
+    }
+
+    async fn retry(&self, msg: &maelstrom::Message) {
+        let mut counter = 0;
+        loop {
+            Self::log(&format!("COUNTER {counter}"));
+            Self::log(&format!("UNACKED {:?}", self.unacked.lock().unwrap()));
+            self.send_reserved(msg);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            counter = counter + 1;
+
+            if !self.unacked.lock().unwrap().contains(msg) {
+                Self::log("STOP LOOP");
+                return;
+            }
+        }
     }
 }

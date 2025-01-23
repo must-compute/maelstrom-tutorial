@@ -2,11 +2,12 @@ mod maelstrom;
 mod node;
 
 use node::Node;
-use std::{io, sync::Arc, thread};
+use std::{io, sync::Arc};
 
 #[tokio::main]
 async fn main() {
     let node = Arc::new(Node::new());
+    // let node = Node::new();
 
     let mut input = String::new();
     let mut is_reading_stdin = true;
@@ -19,17 +20,8 @@ async fn main() {
             })
             .expect("read_line should succeed");
 
-        serde_json::from_str(&input)
-            .and_then(|msg| {
-                thread::spawn({
-                    let node = node.clone();
-                    move || {
-                        node.handle(&msg);
-                    }
-                });
-                Ok(())
-            })
-            .expect("reading input as JSON should succeed");
+        let msg = serde_json::from_str(&input).expect("reading input as JSON should succeed");
+        node.clone().handle(&msg).await;
 
         input.clear();
     }
