@@ -1,9 +1,13 @@
-use crate::maelstrom;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::{io, thread};
+use std::{
+    collections::HashSet,
+    io,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
 use tokio::sync::mpsc::{self, Sender};
+
+use crate::maelstrom;
 
 pub(crate) enum RetryMessage {
     Retry(maelstrom::Message),
@@ -24,9 +28,6 @@ impl Node {
     }
 
     pub async fn handle(&mut self, msg: &maelstrom::Message, tx: Sender<RetryMessage>) {
-        // TODO this is temporary
-        let log_prefix = format!("WHILE PROCESSING: {:?}, logged:\t", msg);
-
         match &msg.body {
             maelstrom::Body::Init { msg_id, .. } => {
                 self.id = msg.dest.clone();
@@ -39,26 +40,13 @@ impl Node {
                     },
                 );
             }
-            maelstrom::Body::InitOk { .. } => todo!(),
-            maelstrom::Body::Echo { msg_id, echo, .. } => {
-                self.send(
-                    &msg.src,
-                    &maelstrom::Body::EchoOk {
-                        msg_id: Some(self.next_msg_id),
-                        in_reply_to: msg_id.clone(),
-                        echo: echo.clone(),
-                    },
-                );
-            }
+            maelstrom::Body::InitOk { .. } => unreachable!(),
+            maelstrom::Body::Echo { .. } => unreachable!(),
             maelstrom::Body::Topology { msg_id, topology } => {
-                let neighbors = topology
+                self.neighbors = topology
                     .get(&self.id.to_string())
                     .unwrap_or(&vec![])
                     .clone();
-
-                self.neighbors = neighbors;
-
-                Self::log(&format!("My neighbors are {:?}", self.neighbors));
 
                 self.send(
                     &msg.src,
@@ -69,10 +57,7 @@ impl Node {
                 );
             }
             maelstrom::Body::Broadcast { msg_id, message } => {
-                Self::log(&format!("{} Received broadcast msg {:?}", log_prefix, msg));
-
                 if let Some(msg_id) = msg_id {
-                    Self::log(&format!("{log_prefix} Sending BroadcastOk to client"));
                     self.send(
                         &msg.src,
                         &maelstrom::Body::BroadcastOk {
@@ -82,22 +67,10 @@ impl Node {
                     );
                 }
 
-                {
-                    Self::log(&format!(
-                        "{} Current messages: {:?}",
-                        log_prefix, self.messages,
-                    ));
-                }
-
                 // avoid re-broadcasting messages already seen by this node.
                 let mut message_is_new = false;
                 if self.messages.get(message).is_none() {
                     self.messages.insert(message.clone());
-                    Self::log(&format!(
-                        "{} Update messages: {:?}",
-                        log_prefix, self.messages
-                    ));
-
                     message_is_new = true;
                 }
 
@@ -143,7 +116,6 @@ impl Node {
     }
 
     fn send(&self, dest: &str, body: &maelstrom::Body) {
-        Self::log(&format!("entering send for {dest} and msg body {:?}", body));
         let msg_id = self.next_msg_id;
         let mut body = body.clone();
         body.set_msg_id(msg_id);
@@ -155,24 +127,13 @@ impl Node {
         };
 
         println!("{}", serde_json::to_string(&msg).unwrap());
-        Self::log(&format!("printed send for {dest} and msg body {:?}", body));
         self.next_msg_id;
-        Self::log(&format!(
-            "incremented next msg id send for {dest} and msg body {:?}",
-            body
-        ));
-    }
-
-    // assumes the id in the message was reserved by using then incrementing self.next_msg_id upon message construction.
-    fn send_reserved(&self, message: &maelstrom::Message) {
-        println!("{}", serde_json::to_string(message).unwrap());
-    }
-
-    fn log(s: &str) {
-        eprintln!("{} | THREAD ID: {:?}", s, thread::current().id());
     }
 }
 
+// TODO: Conceptually, everything inside run() is the Node's responsibility, so
+// I'd like to find a more elegant approach. I'm moving on for now, since this is
+// all just for experimentation...
 pub async fn run() {
     let mut node = Node::new();
 
@@ -198,9 +159,12 @@ pub async fn run() {
     });
 
     let unacked = unacked.clone();
+
     tokio::spawn(async move {
         loop {
             unacked.lock().unwrap().iter().for_each(|msg| {
+                // We don't need to use Node.send() here because the unacked
+                // msgs are already constructed, with a reserved msg_id.
                 println!("{}", serde_json::to_string(msg).unwrap());
             });
             tokio::time::sleep(Duration::from_secs(1)).await;
