@@ -26,6 +26,55 @@ impl Node {
     pub fn new() -> Self {
         Default::default()
     }
+    pub async fn run(&mut self) {
+        let (tx, mut rx) = mpsc::channel(32);
+        let unacked: Arc<Mutex<Vec<maelstrom::Message>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // async add/remove from unacked broadcast msgs, based on recv from Node.handler()
+        tokio::spawn({
+            let unacked = unacked.clone();
+            async move {
+                while let Some(message) = rx.recv().await {
+                    match message {
+                        RetryMessage::Retry(msg) => unacked.lock().unwrap().push(msg),
+                        RetryMessage::StopRetry(msg_id) => unacked
+                            .lock()
+                            .unwrap()
+                            .retain(|msg| msg.body.msg_id() != msg_id),
+                    }
+                }
+            }
+        });
+
+        // async batched retry for unacked broadcast msgs
+        tokio::spawn({
+            let unacked = unacked.clone();
+            async move {
+                loop {
+                    unacked.lock().unwrap().iter().for_each(|msg| {
+                        // We don't need to use Node.send() here because the unacked
+                        // msgs are already constructed, with a reserved msg_id.
+                        println!("{}", serde_json::to_string(msg).unwrap());
+                    });
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        });
+
+        let mut input = String::new();
+        let mut is_reading_stdin = true;
+        while is_reading_stdin {
+            if let Err(e) = io::stdin().read_line(&mut input) {
+                println!("readline error: {e}");
+                is_reading_stdin = false;
+            }
+
+            let json_msg = serde_json::from_str(&input).expect("should take a JSON message");
+            self.handle(&json_msg, tx.clone()).await;
+
+            input.clear();
+        }
+    }
 
     pub async fn handle(&mut self, msg: &maelstrom::Message, tx: Sender<RetryMessage>) {
         match &msg.body {
@@ -131,55 +180,7 @@ impl Node {
     }
 }
 
-// TODO: Conceptually, everything inside run() is the Node's responsibility, so
-// I'd like to find a more elegant approach. I'm moving on for now, since this is
-// all just for experimentation...
 pub async fn run() {
     let mut node = Node::new();
-
-    let mut input = String::new();
-    let mut is_reading_stdin = true;
-
-    let (tx, mut rx) = mpsc::channel(32);
-    let unacked: Arc<Mutex<Vec<maelstrom::Message>>> = Arc::new(Mutex::new(Vec::new()));
-
-    tokio::spawn({
-        let unacked = unacked.clone();
-        async move {
-            while let Some(message) = rx.recv().await {
-                match message {
-                    RetryMessage::Retry(msg) => unacked.lock().unwrap().push(msg),
-                    RetryMessage::StopRetry(msg_id) => unacked
-                        .lock()
-                        .unwrap()
-                        .retain(|msg| msg.body.msg_id() != msg_id),
-                }
-            }
-        }
-    });
-
-    let unacked = unacked.clone();
-
-    tokio::spawn(async move {
-        loop {
-            unacked.lock().unwrap().iter().for_each(|msg| {
-                // We don't need to use Node.send() here because the unacked
-                // msgs are already constructed, with a reserved msg_id.
-                println!("{}", serde_json::to_string(msg).unwrap());
-            });
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
-
-    while is_reading_stdin {
-        if let Err(e) = io::stdin().read_line(&mut input) {
-            println!("readline error: {e}");
-            is_reading_stdin = false;
-        }
-
-        let json_msg = serde_json::from_str(&input).expect("should take a JSON message");
-        node.handle(&json_msg, tx.clone()).await;
-
-        input.clear();
-    }
+    node.run().await;
 }
