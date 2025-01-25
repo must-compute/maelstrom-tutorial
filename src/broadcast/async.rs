@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::{io, thread};
 use tokio::sync::mpsc::{self, Sender};
 
-enum RetryMessage {
+pub(crate) enum RetryMessage {
     Retry(maelstrom::Message),
     StopRetry(usize), // TODO use a custom msg id type
 }
@@ -15,7 +15,7 @@ pub struct Node {
     pub id: String,
     pub next_msg_id: usize,
     pub neighbors: Vec<String>,
-    messages: HashSet<serde_json::Value>,
+    pub messages: HashSet<serde_json::Value>,
 }
 
 impl Node {
