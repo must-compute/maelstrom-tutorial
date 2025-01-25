@@ -90,8 +90,6 @@ impl Node {
                     },
                 );
             }
-            maelstrom::Body::InitOk { .. } => unreachable!(),
-            maelstrom::Body::Echo { .. } => unreachable!(),
             maelstrom::Body::Topology { msg_id, topology } => {
                 self.neighbors = topology
                     .get(&self.id.to_string())
