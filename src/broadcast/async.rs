@@ -26,6 +26,7 @@ impl Node {
     pub fn new() -> Self {
         Default::default()
     }
+
     pub async fn run(&mut self) {
         let (tx, mut rx) = mpsc::channel(32);
         let unacked: Arc<Mutex<Vec<maelstrom::Message>>> = Arc::new(Mutex::new(Vec::new()));
