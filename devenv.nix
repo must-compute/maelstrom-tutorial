@@ -11,6 +11,7 @@
     pkgs.graphviz
     pkgs.openjdk17
     pkgs.wget
+    pkgs.delta
   ];
 
   # https://devenv.sh/languages/
@@ -32,6 +33,21 @@
       tar -xf maelstrom.tar.bz2
       rm maelstrom.tar.bz2
      '';
+
+  scripts.configure-git.exec = ''
+    cat <<EOF >> .git/config
+    [core]
+        pager = delta --line-numbers --side-by-side
+    [interactive]
+        diffFilter = delta --color-only --line-numbers --side-by-side
+    [delta]
+        navigate = true
+    [merge]
+        conflictStyle = zdiff3
+    EOF
+
+    echo "updated local config in .git/config"
+'';
 
   enterShell = ''
     hello
