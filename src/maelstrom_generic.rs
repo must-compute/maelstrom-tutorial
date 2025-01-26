@@ -11,12 +11,12 @@ pub trait MessageBody {
 pub struct Message<T: MessageBody> {
     pub src: String,
     pub dest: String,
-    pub body: T,
+    pub body: Body<T>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum Body {
+pub enum Body<T: MessageBody> {
     Init {
         msg_id: usize,
         node_id: String,
@@ -76,10 +76,10 @@ pub enum Body {
         in_reply_to: usize,
         value: HashSet<serde_json::Value>,
     },
-    Todo(serde_json::Value),
+    Custom(T),
 }
 
-impl MessageBody for Body {
+impl<T: MessageBody> MessageBody for Body<T> {
     fn msg_id(&self) -> usize {
         match self {
             Body::Init { msg_id, .. } => *msg_id,
@@ -95,7 +95,7 @@ impl MessageBody for Body {
             Body::GSetAdd { msg_id, .. } => *msg_id,
             Body::GSetAddOk { msg_id, .. } => msg_id.unwrap(),
             Body::GSetReadOk { msg_id, .. } => msg_id.unwrap(),
-            Body::Todo(_) => todo!(),
+            Body::Custom(msg) => msg.msg_id(),
         }
     }
     fn set_msg_id(&mut self, new_id: usize) {
@@ -113,7 +113,7 @@ impl MessageBody for Body {
             Body::GSetAdd { ref mut msg_id, .. } => *msg_id = new_id,
             Body::GSetAddOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
             Body::GSetReadOk { msg_id, .. } => *msg_id = Some(new_id),
-            Body::Todo(_) => todo!(),
+            Body::Custom(msg) => msg.set_msg_id(new_id),
         };
     }
 }
