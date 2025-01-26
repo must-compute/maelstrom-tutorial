@@ -1,14 +1,20 @@
 use serde::{Deserialize, Serialize};
+
 use std::collections::{HashMap, HashSet};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Message {
-    pub src: String,
-    pub dest: String,
-    pub body: Body,
+pub trait MessageBody {
+    fn msg_id(&self) -> usize;
+    fn set_msg_id(&mut self, msg_id: usize);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Message<T: MessageBody> {
+    pub src: String,
+    pub dest: String,
+    pub body: T,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Body {
     Init {
@@ -73,8 +79,8 @@ pub enum Body {
     Todo(serde_json::Value),
 }
 
-impl Body {
-    pub fn msg_id(&self) -> usize {
+impl MessageBody for Body {
+    fn msg_id(&self) -> usize {
         match self {
             Body::Init { msg_id, .. } => *msg_id,
             Body::InitOk { msg_id, .. } => msg_id.unwrap(),
@@ -92,7 +98,7 @@ impl Body {
             Body::Todo(_) => todo!(),
         }
     }
-    pub fn set_msg_id(&mut self, new_id: usize) {
+    fn set_msg_id(&mut self, new_id: usize) {
         match self {
             Body::Init { ref mut msg_id, .. } => *msg_id = new_id,
             Body::InitOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
