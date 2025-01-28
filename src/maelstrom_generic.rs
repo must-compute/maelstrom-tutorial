@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 pub trait MessageBody {
     fn msg_id(&self) -> usize;
-    fn set_msg_id(&mut self, msg_id: usize);
+    fn set_msg_id(&mut self, new_id: usize);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -76,6 +76,7 @@ pub enum Body<T: MessageBody> {
         in_reply_to: usize,
         value: HashSet<serde_json::Value>,
     },
+    #[serde(untagged)]
     Custom(T),
 }
 
