@@ -32,6 +32,8 @@ elif [ "$1" = "g-set" ]; then
   cargo build && $MAELSTROM test -w g-set --bin $BINARY --log-stderr
 elif [ "$1" = "g-set-30s-partition" ]; then
   cargo build && $MAELSTROM test -w g-set --bin $BINARY --time-limit 30 --rate 10 --nemesis partition --log-stderr
+elif [ "$1" = "g-counter" ]; then
+  cargo build && $MAELSTROM test -w g-counter --bin $BINARY --time-limit 20 --rate 10 --log-stderr
 else
   echo "unknown command"
 fi

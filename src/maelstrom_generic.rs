@@ -51,16 +51,20 @@ pub enum Body<T: MessageBody> {
         msg_id: Option<usize>,
         in_reply_to: usize,
     },
-    // used by Broadcast, and G-Set
+    // used by Broadcast, G-Set, G-Counter
     Read {
         msg_id: usize,
     },
+    // TODO rename to BroadcastReadOK
     ReadOk {
         msg_id: Option<usize>,
         in_reply_to: usize,
         messages: HashSet<serde_json::Value>,
     },
-    #[serde(rename = "add")]
+    // TODO renamed this due to name clash with GCounterAdd.
+    //      So GSet workloads are broken until I fix this.
+    //      (it should also be called 'add')
+    #[serde(rename = "add2")]
     GSetAdd {
         msg_id: usize,
         element: serde_json::Value,
@@ -75,6 +79,22 @@ pub enum Body<T: MessageBody> {
         msg_id: Option<usize>,
         in_reply_to: usize,
         value: HashSet<serde_json::Value>,
+    },
+    #[serde(rename = "add")]
+    GCounterAdd {
+        msg_id: usize,
+        delta: usize, // TODO or i32?
+    },
+    #[serde(rename = "add_ok")]
+    GCounterAddOk {
+        msg_id: Option<usize>,
+        in_reply_to: usize,
+    },
+    #[serde(rename = "read_ok")]
+    GCounterReadOk {
+        msg_id: Option<usize>,
+        in_reply_to: usize,
+        value: usize,
     },
     #[serde(untagged)]
     Custom(T),
@@ -96,6 +116,9 @@ impl<T: MessageBody> MessageBody for Body<T> {
             Body::GSetAdd { msg_id, .. } => *msg_id,
             Body::GSetAddOk { msg_id, .. } => msg_id.unwrap(),
             Body::GSetReadOk { msg_id, .. } => msg_id.unwrap(),
+            Body::GCounterAdd { msg_id, .. } => *msg_id,
+            Body::GCounterAddOk { msg_id, .. } => msg_id.unwrap(),
+            Body::GCounterReadOk { msg_id, .. } => msg_id.unwrap(),
             Body::Custom(msg) => msg.msg_id(),
         }
     }
@@ -113,7 +136,10 @@ impl<T: MessageBody> MessageBody for Body<T> {
             Body::ReadOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
             Body::GSetAdd { ref mut msg_id, .. } => *msg_id = new_id,
             Body::GSetAddOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
-            Body::GSetReadOk { msg_id, .. } => *msg_id = Some(new_id),
+            Body::GSetReadOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::GCounterAdd { ref mut msg_id, .. } => *msg_id = new_id,
+            Body::GCounterAddOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::GCounterReadOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
             Body::Custom(msg) => msg.set_msg_id(new_id),
         };
     }
