@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
+use super::micro_op::MicroOperation;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message {
     pub src: String,
@@ -29,23 +31,35 @@ pub enum Body {
         msg_id: Option<usize>,
         in_reply_to: usize,
     },
+    Txn {
+        msg_id: usize,
+        txn: Vec<MicroOperation>,
+    },
+    TxnOk {
+        txn: Vec<MicroOperation>,
+        in_reply_to: usize,
+    },
 }
 
 impl Body {
-    fn msg_id(&self) -> usize {
+    pub fn msg_id(&self) -> usize {
         match self {
             Body::Init { msg_id, .. } => *msg_id,
             Body::InitOk { msg_id, .. } => msg_id.unwrap(),
             Body::Topology { msg_id, .. } => *msg_id,
             Body::TopologyOk { msg_id, .. } => msg_id.unwrap(),
+            Body::Txn { msg_id, .. } => *msg_id,
+            Body::TxnOk { .. } => unreachable!(),
         }
     }
-    fn set_msg_id(&mut self, new_id: usize) {
+    pub fn set_msg_id(&mut self, new_id: usize) {
         match self {
             Body::Init { ref mut msg_id, .. } => *msg_id = new_id,
             Body::InitOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
             Body::Topology { ref mut msg_id, .. } => *msg_id = new_id,
             Body::TopologyOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
+            Body::Txn { ref mut msg_id, .. } => *msg_id = new_id,
+            Body::TxnOk { .. } => unreachable!(),
         };
     }
 }

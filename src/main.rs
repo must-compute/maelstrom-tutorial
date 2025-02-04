@@ -6,5 +6,5 @@ mod maelstrom_generic;
 
 #[tokio::main]
 async fn main() {
-    crdt::g_counter::run().await
+    datomic::transactor::run().await;
 }
