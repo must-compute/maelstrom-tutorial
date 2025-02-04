@@ -12,6 +12,7 @@
     pkgs.openjdk17
     pkgs.wget
     pkgs.delta
+    pkgs.tree
   ];
 
   # https://devenv.sh/languages/
