@@ -1,5 +1,6 @@
 mod broadcast;
 mod crdt;
+mod datomic;
 mod maelstrom;
 mod maelstrom_generic;
 
