@@ -1,12 +1,40 @@
+use std::collections::HashMap;
+
 use crate::datomic::message::Body;
 use tokio::sync::mpsc::Sender;
 
-use super::message::Message;
+use super::{
+    message::{Message, Transaction},
+    micro_op::MicroOperation,
+};
+
+#[derive(Default)]
+pub struct State {
+    kv: HashMap<usize, Vec<i64>>,
+}
+
+impl State {
+    pub fn transact(&mut self, mut txn: Transaction) -> Transaction {
+        for op in txn.iter_mut() {
+            match op {
+                MicroOperation::Read { key, value } => {
+                    *value = self.kv.get(key).map(|v| v.to_owned())
+                }
+                MicroOperation::Append { key, value } => {
+                    self.kv.entry(*key).or_insert(vec![]).push(*value)
+                }
+            }
+        }
+
+        txn
+    }
+}
 
 #[derive(Default)]
 pub struct Node {
     pub id: String,
     pub node_ids: Vec<String>, // Every node in the network (including this node)
+    pub state: State,
 }
 
 impl Node {
@@ -19,7 +47,7 @@ impl Node {
 
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
 
-        //write task
+        // write task
         tokio::spawn(async move {
             let mut next_msg_id = 0;
             while let Some(mut msg) = msg_rx.recv().await {
@@ -75,19 +103,20 @@ impl Node {
                 )
                 .await;
             }
-            Body::Topology { msg_id, topology } => todo!(),
-            Body::Txn { msg_id, txn } => {
+            Body::Topology { .. } => todo!(),
+            Body::Txn { txn, .. } => {
+                let txn_result = self.state.transact(txn.clone());
                 self.send(
                     tx,
                     &msg.src,
                     &Body::TxnOk {
-                        txn: txn.clone(),
+                        txn: txn_result,
                         in_reply_to: msg.body.msg_id(),
                     },
                 )
                 .await
             }
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 

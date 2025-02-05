@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use super::micro_op::MicroOperation;
 
+pub type Transaction = Vec<MicroOperation>;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message {
     pub src: String,
