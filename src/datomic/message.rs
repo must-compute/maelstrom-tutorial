@@ -41,6 +41,35 @@ pub enum Body {
         txn: Vec<MicroOperation>,
         in_reply_to: usize,
     },
+    // lin-kv
+    Read {
+        msg_id: usize,
+        key: String, // technically it should be Any
+    },
+    ReadOk {
+        msg_id: usize,
+        in_reply_to: usize,
+        value: serde_json::Value,
+    },
+    Write {
+        msg_id: usize,
+        key: String, // technically it should be Any
+        value: serde_json::Value,
+    },
+    WriteOk {
+        msg_id: usize,
+        in_reply_to: usize,
+    },
+    Cas {
+        msg_id: usize,
+        key: String, // technically it should be Any
+        from: serde_json::Value,
+        to: serde_json::Value,
+    },
+    CasOk {
+        msg_id: usize,
+        in_reply_to: usize,
+    },
 }
 
 impl Body {
@@ -52,6 +81,12 @@ impl Body {
             Body::TopologyOk { msg_id, .. } => msg_id.unwrap(),
             Body::Txn { msg_id, .. } => *msg_id,
             Body::TxnOk { .. } => unreachable!(),
+            Body::Read { msg_id, .. } => *msg_id,
+            Body::ReadOk { msg_id, .. } => *msg_id,
+            Body::Write { msg_id, .. } => *msg_id,
+            Body::WriteOk { msg_id, .. } => *msg_id,
+            Body::Cas { msg_id, .. } => *msg_id,
+            Body::CasOk { msg_id, .. } => *msg_id,
         }
     }
     pub fn set_msg_id(&mut self, new_id: usize) {
@@ -62,6 +97,12 @@ impl Body {
             Body::TopologyOk { ref mut msg_id, .. } => *msg_id = Some(new_id),
             Body::Txn { ref mut msg_id, .. } => *msg_id = new_id,
             Body::TxnOk { .. } => unreachable!(),
+            Body::Read { msg_id, .. } => *msg_id = new_id,
+            Body::ReadOk { msg_id, .. } => *msg_id = new_id,
+            Body::Write { msg_id, .. } => *msg_id = new_id,
+            Body::WriteOk { msg_id, .. } => *msg_id = new_id,
+            Body::Cas { msg_id, .. } => *msg_id = new_id,
+            Body::CasOk { msg_id, .. } => *msg_id = new_id,
         };
     }
 }
