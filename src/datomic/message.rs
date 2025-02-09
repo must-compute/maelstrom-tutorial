@@ -47,7 +47,7 @@ pub enum Body {
         key: String, // technically it should be Any
     },
     ReadOk {
-        msg_id: usize,
+        msg_id: Option<usize>,
         in_reply_to: usize,
         value: serde_json::Value,
     },
@@ -65,10 +65,16 @@ pub enum Body {
         key: String, // technically it should be Any
         from: serde_json::Value,
         to: serde_json::Value,
+        create_if_not_exists: bool,
     },
     CasOk {
-        msg_id: usize,
+        msg_id: Option<usize>,
         in_reply_to: usize,
+    },
+    Error {
+        in_reply_to: usize,
+        code: usize, // TODO use an error code type
+        text: String,
     },
 }
 
@@ -82,11 +88,12 @@ impl Body {
             Body::Txn { msg_id, .. } => *msg_id,
             Body::TxnOk { .. } => unreachable!(),
             Body::Read { msg_id, .. } => *msg_id,
-            Body::ReadOk { msg_id, .. } => *msg_id,
+            Body::ReadOk { msg_id, .. } => msg_id.unwrap(),
             Body::Write { msg_id, .. } => *msg_id,
             Body::WriteOk { msg_id, .. } => *msg_id,
             Body::Cas { msg_id, .. } => *msg_id,
-            Body::CasOk { msg_id, .. } => *msg_id,
+            Body::CasOk { msg_id, .. } => msg_id.unwrap(),
+            Body::Error { .. } => panic!("error msgs have no msg id"), // this inidicates an issue with the body type. TODO cleaner design
         }
     }
     pub fn set_msg_id(&mut self, new_id: usize) {
@@ -98,11 +105,22 @@ impl Body {
             Body::Txn { ref mut msg_id, .. } => *msg_id = new_id,
             Body::TxnOk { .. } => unreachable!(),
             Body::Read { msg_id, .. } => *msg_id = new_id,
-            Body::ReadOk { msg_id, .. } => *msg_id = new_id,
+            Body::ReadOk { msg_id, .. } => *msg_id = Some(new_id),
             Body::Write { msg_id, .. } => *msg_id = new_id,
             Body::WriteOk { msg_id, .. } => *msg_id = new_id,
             Body::Cas { msg_id, .. } => *msg_id = new_id,
-            Body::CasOk { msg_id, .. } => *msg_id = new_id,
+            Body::CasOk { msg_id, .. } => *msg_id = Some(new_id),
+            Body::Error { .. } => panic!("error msgs have no msg id"),
         };
+    }
+    pub fn in_reply_to(&self) -> usize {
+        match self {
+            Body::TxnOk { in_reply_to, .. } => *in_reply_to,
+            Body::ReadOk { in_reply_to, .. } => *in_reply_to,
+            Body::WriteOk { in_reply_to, .. } => *in_reply_to,
+            Body::CasOk { in_reply_to, .. } => *in_reply_to,
+            Body::Error { in_reply_to, .. } => *in_reply_to,
+            _ => panic!("shouldn't be used"),
+        }
     }
 }

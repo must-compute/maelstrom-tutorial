@@ -4,8 +4,14 @@ use serde::{ser::SerializeSeq, Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MicroOperation {
-    Read { key: usize, value: Option<Vec<i64>> },
-    Append { key: usize, value: i64 },
+    Read {
+        key: usize,
+        value: Option<Vec<usize>>,
+    },
+    Append {
+        key: usize,
+        value: usize,
+    },
 }
 
 impl Serialize for MicroOperation {
@@ -60,7 +66,7 @@ impl<'de> Deserialize<'de> for MicroOperation {
                 match operation {
                     "r" => {
                         let value = seq
-                            .next_element::<Option<Vec<i64>>>()?
+                            .next_element::<Option<Vec<usize>>>()?
                             .expect("read txn op should contain a op,k,v . Here, the v is missing");
                         if value.is_some() {
                             panic!("expected null for read txn value. got {:?}", value);
@@ -69,8 +75,8 @@ impl<'de> Deserialize<'de> for MicroOperation {
                     }
                     "append" => {
                         let value = seq
-                            .next_element::<i64>()?
-                            .expect("append txn should have an i64 value to append");
+                            .next_element::<usize>()?
+                            .expect("append txn should have an usize value to append");
 
                         return Ok(MicroOperation::Append { key, value });
                     }
