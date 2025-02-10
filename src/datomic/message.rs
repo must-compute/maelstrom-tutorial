@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use std::collections::HashMap;
 
@@ -73,7 +74,7 @@ pub enum Body {
     },
     Error {
         in_reply_to: usize,
-        code: usize, // TODO use an error code type
+        code: ErrorCode,
         text: String,
     },
 }
@@ -123,4 +124,18 @@ impl Body {
             _ => panic!("shouldn't be used"),
         }
     }
+}
+
+#[derive(Serialize_repr, Deserialize_repr, PartialEq, Debug, Clone)]
+#[repr(u8)]
+pub enum ErrorCode {
+    Timeout = 0,
+    NotSupported = 10,
+    TemporarilyUnavailable = 11,
+    MalformedRequest = 12,
+    Crash = 13,
+    Abort = 14,
+    KeyDoesNotExist = 20,
+    PreconditionFailed = 22,
+    TxnConflict = 30,
 }

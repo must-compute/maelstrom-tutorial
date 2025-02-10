@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::datomic::message::Body;
+use crate::datomic::message::{Body, ErrorCode};
 use tokio::sync::mpsc::Sender;
 
 use super::{
@@ -11,7 +11,7 @@ use super::{
 type ResponseNotifier = tokio::sync::oneshot::Sender<Message>;
 
 // events that handle() will generate
-enum Event {
+pub enum Event {
     Send {
         message: Message,
         notifier: Option<ResponseNotifier>,
@@ -67,26 +67,19 @@ impl Node {
                             next_msg_id += 1;
                         }
                         println!("{}", serde_json::to_string(&message).unwrap());
-                        eprintln!("I SENT: {:?}", serde_json::to_string(&message).unwrap());
                         if let Some(notifier) = notifier {
                             unacked.insert(message.body.msg_id(), notifier);
                         }
                     }
                     Event::Received { response } => {
-                        dbg!(&unacked);
                         // we received an ack, so we notify and remove from unacked.
-                        dbg!(&response);
-                        if let Some(notifier) = dbg!(unacked.remove(&response.body.in_reply_to())) {
+                        if let Some(notifier) = unacked.remove(&response.body.in_reply_to()) {
                             notifier.send(response).unwrap();
-                            eprintln!("we made it to 71");
                         }
                     }
                 }
             }
         });
-
-        // stdout task
-        tokio::spawn(async move { while let Some(mut msg) = msg_rx.recv().await {} });
 
         // stdin task
         tokio::spawn(async move {
@@ -122,7 +115,6 @@ impl Node {
 
     // TODO this can now be a free function (now that Node is useless)
     async fn handle(&self, tx: Sender<Event>, msg: &Message) {
-        eprintln!("{:?}", msg);
         match &msg.body {
             Body::Init {
                 msg_id,
@@ -146,7 +138,6 @@ impl Node {
                     },
                 )
                 .await;
-                eprintln!("SENT INIT OK IN RESPONSE TO CLIENT: {:?}", msg.src);
             }
             Body::Topology { .. } => todo!(),
             Body::Txn { txn, .. } => {
@@ -210,15 +201,11 @@ impl Node {
             .await;
         let response = notifier_rx.await.unwrap();
 
-        eprintln!("210");
-
         let initial_read = match response.body {
             Body::ReadOk { value, .. } => state_from_json_value(value),
             Body::Error { code, .. } => {
                 // https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md#errors
-                // TODO stop using magic numbers
-                if code == 20 {
-                    // key-does-not-exist
+                if code == ErrorCode::KeyDoesNotExist {
                     HashMap::<usize, Vec<usize>>::new()
                 } else {
                     panic!("unexpected error code while reading from lin-kv");
@@ -239,8 +226,6 @@ impl Node {
             }
         }
 
-        eprintln!("239");
-
         // cas
         let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
         let cas_msg = Body::Cas {
@@ -254,14 +239,12 @@ impl Node {
             .await;
         let response = notifier_rx.await.unwrap();
 
-        dbg!(&response);
-
         // TODO this is probably not needed
         if !matches!(response.body, Body::CasOk { .. }) {
             panic!();
         }
 
-        dbg!(txn)
+        txn
     }
 }
 
