@@ -40,7 +40,6 @@ impl Node {
     }
 
     async fn run(self) {
-        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<Message>(32);
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(32);
 
@@ -186,20 +185,27 @@ impl Node {
             .unwrap();
     }
 
+    // blocks until obtaining the response Message
+    async fn sync_rpc(&self, event_tx: Sender<Event>, dest: &str, msg_body: &Body) -> Message {
+        let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
+        self.send(event_tx.clone(), Some(notifier_tx), dest, msg_body)
+            .await;
+        let response = notifier_rx.await.unwrap();
+        response
+    }
+
     pub async fn transact(&self, event_tx: Sender<Event>, mut txn: Transaction) -> Transaction {
         let root = String::from("ROOT");
         let lin_kv = String::from("lin-kv");
 
-        let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
-
-        let read_msg = Body::Read {
+        let read_msg_body = Body::Read {
             msg_id: 0,
             key: root.clone(),
         };
 
-        self.send(event_tx.clone(), Some(notifier_tx), &lin_kv, &read_msg)
+        let response = self
+            .sync_rpc(event_tx.clone(), &lin_kv, &read_msg_body)
             .await;
-        let response = notifier_rx.await.unwrap();
 
         let initial_read = match response.body {
             Body::ReadOk { value, .. } => state_from_json_value(value),
@@ -227,17 +233,17 @@ impl Node {
         }
 
         // cas
-        let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
-        let cas_msg = Body::Cas {
+        let cas_msg_body = Body::Cas {
             msg_id: 0,
             key: root.clone(),
             from: serde_json::to_value(initial_read).unwrap(),
             to: serde_json::to_value(local_snapshot.clone()).unwrap(),
             create_if_not_exists: true,
         };
-        self.send(event_tx.clone(), Some(notifier_tx), &lin_kv, &cas_msg)
+
+        let response = self
+            .sync_rpc(event_tx.clone(), &lin_kv, &cas_msg_body)
             .await;
-        let response = notifier_rx.await.unwrap();
 
         // TODO this is probably not needed
         if !matches!(response.body, Body::CasOk { .. }) {
