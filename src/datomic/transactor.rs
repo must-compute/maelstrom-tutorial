@@ -12,13 +12,13 @@ type ResponseNotifier = tokio::sync::oneshot::Sender<Message>;
 
 #[derive(Debug)]
 enum DatomicError {
-    TransactionFailed,
+    TransactionConflict,
 }
 
 impl std::fmt::Display for DatomicError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DatomicError::TransactionFailed => write!(f, "Transaction failed"),
+            DatomicError::TransactionConflict => write!(f, "Transaction failed"),
         }
     }
 }
@@ -76,7 +76,9 @@ impl Node {
                         mut message,
                         notifier,
                     } => {
-                        if !matches!(message.body, Body::TxnOk { .. }) {
+                        if !matches!(message.body, Body::TxnOk { .. })
+                            && !matches!(message.body, Body::Error { .. })
+                        {
                             message.body.set_msg_id(next_msg_id);
                             next_msg_id += 1;
                         }
@@ -154,19 +156,39 @@ impl Node {
                 )
                 .await;
             }
-            Body::Topology { .. } => todo!(),
             Body::Txn { txn, .. } => {
                 let txn_result = self.transact(tx.clone(), txn.clone()).await;
-                self.send(
-                    tx.clone(),
-                    None, // TODO not sure
-                    &msg.src,
-                    &Body::TxnOk {
-                        txn: txn_result.unwrap(),
-                        in_reply_to: msg.body.msg_id(),
+
+                match txn_result {
+                    Ok(completed_txn) => {
+                        self.send(
+                            tx.clone(),
+                            None,
+                            &msg.src,
+                            &Body::TxnOk {
+                                txn: completed_txn,
+                                in_reply_to: msg.body.msg_id(),
+                            },
+                        )
+                        .await
+                    }
+                    Err(e) => match e.downcast_ref::<DatomicError>() {
+                        Some(DatomicError::TransactionConflict) => {
+                            self.send(
+                                tx.clone(),
+                                None,
+                                &msg.src,
+                                &Body::Error {
+                                    in_reply_to: msg.body.msg_id(),
+                                    code: ErrorCode::TxnConflict,
+                                    text: "CAS failed!".to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                        None => panic!("unexpected txn failure"),
                     },
-                )
-                .await
+                };
             }
             _ => {
                 tx.send(Event::Received {
@@ -265,11 +287,15 @@ impl Node {
             .sync_rpc(event_tx.clone(), &lin_kv, &cas_msg_body)
             .await;
 
-        // TODO this is probably not needed
-        if matches!(response.body, Body::Error { .. }) {
-            // self.send(event_tx.clone(), None, dest, body).await
-            // return Err(Box::new(Foo::A));
-            return Err(DatomicError::TransactionFailed);
+        if matches!(
+            response.body,
+            Body::Error {
+                code: ErrorCode::PreconditionFailed,
+                ..
+            }
+        ) {
+            let err = anyhow::Error::new(DatomicError::TransactionConflict);
+            return Err(err);
         }
 
         Ok(txn)
