@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
-
 use crate::datomic::message::{Body, ErrorCode};
+use anyhow::Result;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::Sender;
 
 use super::{
@@ -9,6 +9,21 @@ use super::{
 };
 
 type ResponseNotifier = tokio::sync::oneshot::Sender<Message>;
+
+#[derive(Debug)]
+enum DatomicError {
+    TransactionFailed,
+}
+
+impl std::fmt::Display for DatomicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DatomicError::TransactionFailed => write!(f, "Transaction failed"),
+        }
+    }
+}
+
+impl std::error::Error for DatomicError {}
 
 // events that handle() will generate
 pub enum Event {
@@ -108,6 +123,7 @@ impl Node {
                         async move {node.handle(event_tx, &json_msg ).await}
                     });
                 }
+                //...
             }
         }
     }
@@ -146,7 +162,7 @@ impl Node {
                     None, // TODO not sure
                     &msg.src,
                     &Body::TxnOk {
-                        txn: txn_result,
+                        txn: txn_result.unwrap(),
                         in_reply_to: msg.body.msg_id(),
                     },
                 )
@@ -194,7 +210,11 @@ impl Node {
         response
     }
 
-    pub async fn transact(&self, event_tx: Sender<Event>, mut txn: Transaction) -> Transaction {
+    pub async fn transact(
+        &self,
+        event_tx: Sender<Event>,
+        mut txn: Transaction,
+    ) -> Result<Transaction> {
         let root = String::from("ROOT");
         let lin_kv = String::from("lin-kv");
 
@@ -237,7 +257,7 @@ impl Node {
             msg_id: 0,
             key: root.clone(),
             from: serde_json::to_value(initial_read).unwrap(),
-            to: serde_json::to_value(local_snapshot.clone()).unwrap(),
+            to: serde_json::to_value(local_snapshot.clone())?,
             create_if_not_exists: true,
         };
 
@@ -246,11 +266,13 @@ impl Node {
             .await;
 
         // TODO this is probably not needed
-        if !matches!(response.body, Body::CasOk { .. }) {
-            panic!();
+        if matches!(response.body, Body::Error { .. }) {
+            // self.send(event_tx.clone(), None, dest, body).await
+            // return Err(Box::new(Foo::A));
+            return Err(DatomicError::TransactionFailed);
         }
 
-        txn
+        Ok(txn)
     }
 }
 
