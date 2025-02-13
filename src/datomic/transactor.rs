@@ -1,13 +1,10 @@
+use std::{collections::HashMap, sync::Arc};
+
 use crate::datomic::message::{Body, ErrorCode};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Receiver, Sender};
 
-use super::{
-    message::{Message, Transaction},
-    micro_op::MicroOperation,
-};
+use super::message::{Message, Transaction};
 
 type ResponseNotifier = tokio::sync::oneshot::Sender<Message>;
 
@@ -44,20 +41,27 @@ pub enum Event {
     },
 }
 
-#[derive(Default)]
 pub struct Node {
+    event_tx: Sender<Event>,
     // pub id: String,
     // pub node_ids: Vec<String>, // Every node in the network (including this node)
 }
 
 impl Node {
-    fn new() -> Self {
-        Self::default()
+    fn new() -> (Self, Receiver<Event>) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(32);
+        (
+
+            Self {
+                event_tx
+            },
+            event_rx
+        )
     }
 
-    async fn run(self) {
+    async fn run(mut self, mut event_rx: Receiver<Event>) {
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(32);
+
 
         // event handler task
         tokio::spawn(async move {
@@ -122,8 +126,7 @@ impl Node {
                 Some(json_msg) = stdin_rx.recv() => {
                     tokio::spawn({
                         let node = node.clone();
-                        let event_tx = event_tx.clone();
-                        async move {node.handle(event_tx, &json_msg ).await}
+                        async move {node.handle(&json_msg ).await}
                     });
                 }
                 //...
@@ -132,14 +135,14 @@ impl Node {
     }
 
     // TODO this can now be a free function (now that Node is useless)
-    async fn handle(&self, tx: Sender<Event>, msg: &Message) {
+    async fn handle(&self, msg: &Message) {
         match &msg.body {
             Body::Init {
                 msg_id,
                 node_id,
                 node_ids,
             } => {
-                tx.send(Event::Init {
+                self.event_tx.send(Event::Init {
                     id: node_id.clone(),
                     node_ids: node_ids.clone(),
                 })
@@ -147,7 +150,6 @@ impl Node {
                 .unwrap();
 
                 self.send(
-                    tx,
                     None,
                     &msg.src,
                     &Body::InitOk {
@@ -158,12 +160,11 @@ impl Node {
                 .await;
             }
             Body::Txn { txn, .. } => {
-                let txn_result = self.transact(tx.clone(), txn.clone()).await;
+                let txn_result = self.transact(txn.clone()).await;
 
                 match txn_result {
                     Ok(completed_txn) => {
                         self.send(
-                            tx.clone(),
                             None,
                             &msg.src,
                             &Body::TxnOk {
@@ -176,7 +177,6 @@ impl Node {
                     Err(e) => match e.downcast_ref::<DatomicError>() {
                         Some(DatomicError::TransactionConflict) => {
                             self.send(
-                                tx.clone(),
                                 None,
                                 &msg.src,
                                 &Body::Error {
@@ -192,7 +192,7 @@ impl Node {
                 };
             }
             _ => {
-                tx.send(Event::Received {
+                self.event_tx.send(Event::Received {
                     response: msg.clone(),
                 })
                 .await
@@ -201,16 +201,15 @@ impl Node {
         }
     }
 
-    async fn send(
+    pub async fn send(
         &self,
-        event_tx: Sender<Event>,
         notifier: Option<ResponseNotifier>,
         dest: &str,
         body: &Body,
     ) {
         let (id_tx, id_rx) = tokio::sync::oneshot::channel::<String>();
 
-        event_tx.send(Event::GetNodeId { tx: id_tx }).await.unwrap();
+        self.event_tx.send(Event::GetNodeId { tx: id_tx }).await.unwrap();
 
         let message = Message {
             src: id_rx.await.unwrap(),
@@ -218,16 +217,16 @@ impl Node {
             body: body.clone(),
         };
 
-        event_tx
+        self.event_tx
             .send(Event::Send { message, notifier })
             .await
             .unwrap();
     }
 
     // blocks until obtaining the response Message
-    async fn sync_rpc(&self, event_tx: Sender<Event>, dest: &str, msg_body: &Body) -> Message {
+    pub async fn sync_rpc(&self, dest: &str, msg_body: &Body) -> Message {
         let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
-        self.send(event_tx.clone(), Some(notifier_tx), dest, msg_body)
+        self.send(Some(notifier_tx), dest, msg_body)
             .await;
         let response = notifier_rx.await.unwrap();
         response
@@ -235,7 +234,6 @@ impl Node {
 
     pub async fn transact(
         &self,
-        event_tx: Sender<Event>,
         mut txn: Transaction,
     ) -> Result<Transaction> {
         let root = String::from("ROOT");
@@ -247,7 +245,7 @@ impl Node {
         };
 
         let response = self
-            .sync_rpc(event_tx.clone(), &lin_kv, &read_msg_body)
+            .sync_rpc(&lin_kv, &read_msg_body)
             .await;
 
         let root_pointer: Option<???> = match response.body {
@@ -289,7 +287,7 @@ impl Node {
         };
 
         let response = self
-            .sync_rpc(event_tx.clone(), &lin_kv, &cas_msg_body)
+            .sync_rpc(&lin_kv, &cas_msg_body)
             .await;
 
         if matches!(
@@ -326,5 +324,6 @@ fn state_from_json_value(value: serde_json::Value) -> ThunkValue {
 }
 
 pub async fn run() {
-    Node::new().run().await;
+    let (node, rx) = Node::new();
+    node.run(rx).await;
 }
