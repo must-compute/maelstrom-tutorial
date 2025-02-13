@@ -126,6 +126,7 @@ impl Body {
     }
 }
 
+// https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md#errors
 #[derive(Serialize_repr, Deserialize_repr, PartialEq, Debug, Clone)]
 #[repr(u8)]
 pub enum ErrorCode {

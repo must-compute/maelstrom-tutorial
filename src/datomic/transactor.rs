@@ -1,5 +1,6 @@
 use crate::datomic::message::{Body, ErrorCode};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::Sender;
 
@@ -249,12 +250,15 @@ impl Node {
             .sync_rpc(event_tx.clone(), &lin_kv, &read_msg_body)
             .await;
 
-        let initial_read = match response.body {
-            Body::ReadOk { value, .. } => state_from_json_value(value),
+        let root_pointer: Option<???> = match response.body {
+            Body::ReadOk { value, .. } => {
+                let value = serde_json::from_value(value)
+                    .expect("lin-kv ReadOk should return a ThunkValue");
+                Some(value)
+            }
             Body::Error { code, .. } => {
-                // https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md#errors
                 if code == ErrorCode::KeyDoesNotExist {
-                    HashMap::<usize, Vec<usize>>::new()
+                    todo!()
                 } else {
                     panic!("unexpected error code while reading from lin-kv");
                 }
@@ -263,6 +267,7 @@ impl Node {
         };
 
         let mut local_snapshot = initial_read.clone();
+
         for op in txn.iter_mut() {
             match op {
                 MicroOperation::Read { key, value } => {
@@ -302,7 +307,7 @@ impl Node {
     }
 }
 
-fn state_from_json_value(value: serde_json::Value) -> HashMap<usize, Vec<usize>> {
+fn state_from_json_value(value: serde_json::Value) -> ThunkValue {
     value
         .as_object()
         .expect("value should be a JSON object")
