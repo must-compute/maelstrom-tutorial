@@ -4,7 +4,11 @@ use crate::datomic::message::{Body, ErrorCode};
 use anyhow::Result;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use super::message::{Message, Transaction};
+use super::{
+    message::{Message, Transaction},
+    micro_op::MicroOperation,
+    thunk::{Thunk, ThunkIdGen, ThunkValue},
+};
 
 type ResponseNotifier = tokio::sync::oneshot::Sender<Message>;
 
@@ -50,18 +54,11 @@ pub struct Node {
 impl Node {
     fn new() -> (Self, Receiver<Event>) {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(32);
-        (
-
-            Self {
-                event_tx
-            },
-            event_rx
-        )
+        (Self { event_tx }, event_rx)
     }
 
-    async fn run(mut self, mut event_rx: Receiver<Event>) {
+    async fn run(mut self, mut event_rx: Receiver<Event>, thunk_id_generator: ThunkIdGen) {
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
-
 
         // event handler task
         tokio::spawn(async move {
@@ -121,12 +118,15 @@ impl Node {
         });
 
         let node = Arc::new(self);
+        let thunk_id_generator = Arc::new(thunk_id_generator);
+
         loop {
             tokio::select! {
                 Some(json_msg) = stdin_rx.recv() => {
                     tokio::spawn({
                         let node = node.clone();
-                        async move {node.handle(&json_msg ).await}
+                        let thunk_id_generator = thunk_id_generator.clone();
+                        async move {node.handle(thunk_id_generator, &json_msg).await}
                     });
                 }
                 //...
@@ -135,19 +135,20 @@ impl Node {
     }
 
     // TODO this can now be a free function (now that Node is useless)
-    async fn handle(&self, msg: &Message) {
+    async fn handle(&self, thunk_id_generator: Arc<ThunkIdGen>, msg: &Message) {
         match &msg.body {
             Body::Init {
                 msg_id,
                 node_id,
                 node_ids,
             } => {
-                self.event_tx.send(Event::Init {
-                    id: node_id.clone(),
-                    node_ids: node_ids.clone(),
-                })
-                .await
-                .unwrap();
+                self.event_tx
+                    .send(Event::Init {
+                        id: node_id.clone(),
+                        node_ids: node_ids.clone(),
+                    })
+                    .await
+                    .unwrap();
 
                 self.send(
                     None,
@@ -160,7 +161,7 @@ impl Node {
                 .await;
             }
             Body::Txn { txn, .. } => {
-                let txn_result = self.transact(txn.clone()).await;
+                let txn_result = self.transact(thunk_id_generator, txn.clone()).await;
 
                 match txn_result {
                     Ok(completed_txn) => {
@@ -192,24 +193,23 @@ impl Node {
                 };
             }
             _ => {
-                self.event_tx.send(Event::Received {
-                    response: msg.clone(),
-                })
-                .await
-                .unwrap();
+                self.event_tx
+                    .send(Event::Received {
+                        response: msg.clone(),
+                    })
+                    .await
+                    .unwrap();
             }
         }
     }
 
-    pub async fn send(
-        &self,
-        notifier: Option<ResponseNotifier>,
-        dest: &str,
-        body: &Body,
-    ) {
+    pub async fn send(&self, notifier: Option<ResponseNotifier>, dest: &str, body: &Body) {
         let (id_tx, id_rx) = tokio::sync::oneshot::channel::<String>();
 
-        self.event_tx.send(Event::GetNodeId { tx: id_tx }).await.unwrap();
+        self.event_tx
+            .send(Event::GetNodeId { tx: id_tx })
+            .await
+            .unwrap();
 
         let message = Message {
             src: id_rx.await.unwrap(),
@@ -226,14 +226,14 @@ impl Node {
     // blocks until obtaining the response Message
     pub async fn sync_rpc(&self, dest: &str, msg_body: &Body) -> Message {
         let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
-        self.send(Some(notifier_tx), dest, msg_body)
-            .await;
+        self.send(Some(notifier_tx), dest, msg_body).await;
         let response = notifier_rx.await.unwrap();
         response
     }
 
     pub async fn transact(
         &self,
+        thunk_id_generator: Arc<ThunkIdGen>,
         mut txn: Transaction,
     ) -> Result<Transaction> {
         let root = String::from("ROOT");
@@ -244,19 +244,18 @@ impl Node {
             key: root.clone(),
         };
 
-        let response = self
-            .sync_rpc(&lin_kv, &read_msg_body)
-            .await;
+        let response = self.sync_rpc(&lin_kv, &read_msg_body).await;
 
-        let root_pointer: Option<???> = match response.body {
+        let kv_thunk: Thunk = match response.body {
             Body::ReadOk { value, .. } => {
-                let value = serde_json::from_value(value)
-                    .expect("lin-kv ReadOk should return a ThunkValue");
-                Some(value)
+                serde_json::from_value(value).expect("lin-kv ReadOk should return a ThunkValue")
             }
             Body::Error { code, .. } => {
                 if code == ErrorCode::KeyDoesNotExist {
-                    todo!()
+                    Thunk::new(
+                        thunk_id_generator.generate(),
+                        ThunkValue::Intermediate(Default::default()),
+                    )
                 } else {
                     panic!("unexpected error code while reading from lin-kv");
                 }
@@ -264,31 +263,65 @@ impl Node {
             _ => panic!("something went wrong while reading from lin-kv"),
         };
 
-        let mut local_snapshot = initial_read.clone();
+        let mut local_snapshot = kv_thunk.clone(); // TODO what ids to alter?
+
+        let ThunkValue::Intermediate(ref mut local_map) = local_snapshot.value(self).await else {
+            panic!("expected a map thunk on the first read")
+        };
 
         for op in txn.iter_mut() {
             match op {
                 MicroOperation::Read { key, value } => {
-                    *value = local_snapshot.get(key).map(|v| v.to_owned())
+                    let mut thunk = local_map
+                        .get(key)
+                        .map(|v| v.to_owned())
+                        .expect("key in txn should exist");
+                    let ThunkValue::Ultimate(ultimate_value) = thunk.value(self).await else {
+                        panic!("reading a key from a map thunk should return an ultimate value")
+                    };
+                    *value = Some(ultimate_value);
                 }
                 MicroOperation::Append { key, value } => {
-                    local_snapshot.entry(*key).or_insert(vec![]).push(*value)
+                    // when life was easy:
+                    // local_snapshot.entry(*key).or_insert(vec![]).push(*value)
+                    // -----
+                    // now life is hard:
+                    let new_value = if let Some(thunk) = local_map.get_mut(key) {
+                        let ThunkValue::Ultimate(ultimate_value) = thunk.value(self).await else {
+                            panic!("reading a key from a map thunk should return an ultimate value")
+                        };
+                        ultimate_value.push(*value);
+                        ultimate_value
+                    } else {
+                        vec![*value]
+                    };
+
+                    let new_thunk = Thunk::new(
+                        thunk_id_generator.generate(),
+                        ThunkValue::Ultimate(new_value),
+                    );
+
+                    local_map.insert(*key, new_thunk);
                 }
             }
         }
+
+        let mut new_thunk = Thunk::new(
+            thunk_id_generator.generate(),
+            ThunkValue::Intermediate(local_map.clone()),
+        );
+        new_thunk.store(self).await;
 
         // cas
         let cas_msg_body = Body::Cas {
             msg_id: 0,
             key: root.clone(),
-            from: serde_json::to_value(initial_read).unwrap(),
-            to: serde_json::to_value(local_snapshot.clone())?,
+            from: serde_json::to_value(kv_thunk).unwrap(),
+            to: serde_json::to_value(new_thunk).unwrap(),
             create_if_not_exists: true,
         };
 
-        let response = self
-            .sync_rpc(&lin_kv, &cas_msg_body)
-            .await;
+        let response = self.sync_rpc(&lin_kv, &cas_msg_body).await;
 
         if matches!(
             response.body,
@@ -305,23 +338,6 @@ impl Node {
     }
 }
 
-fn state_from_json_value(value: serde_json::Value) -> ThunkValue {
-    value
-        .as_object()
-        .expect("value should be a JSON object")
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.parse::<usize>().expect("key should be a number"),
-                v.as_array()
-                    .expect("value should be an array")
-                    .iter()
-                    .map(|n| n.as_u64().expect("array element should be a number") as usize)
-                    .collect(),
-            )
-        })
-        .collect()
-}
 
 pub async fn run() {
     let (node, rx) = Node::new();

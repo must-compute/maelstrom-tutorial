@@ -9,14 +9,16 @@
 //       6:│n0-0┼─► [1]
 //         └────┘
 
-use core::hash;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::datomic::message::Body;
 
-use super::transactor::{Event, Node};
+use super::transactor::Node;
 
 type ThunkId = String;
 
@@ -36,27 +38,27 @@ enum ThunkState {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
-enum ThunkValue {
+pub(crate) enum ThunkValue {
     Intermediate(HashMap<usize, Thunk>),
     Ultimate(Vec<usize>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct Thunk {
+pub(crate) struct Thunk {
     id: ThunkId,
     #[serde(skip_serializing)]
     state: ThunkState,
 }
 
 impl Thunk {
-    fn new(thunk_id: ThunkId, value: ThunkValue) -> Self {
+    pub fn new(thunk_id: ThunkId, value: ThunkValue) -> Self {
         Self {
             id: thunk_id,
             state: ThunkState::NotInStorage(value),
         }
     }
 
-    async fn store(&mut self, node: &Node) {
+    pub async fn store(&mut self, node: &Node) {
         match self.state {
             ThunkState::InStorage(_) => (),
             ThunkState::NotInStorage(ref mut thunk_value) => {
@@ -86,7 +88,7 @@ impl Thunk {
         }
     }
 
-    async fn value(&mut self, node: &Node) -> ThunkValue {
+    pub async fn value(&mut self, node: &Node) -> ThunkValue {
         match &self.state {
             ThunkState::NotInStorage(thunk_value)
             | ThunkState::InStorage(ValueState::Evaluated(thunk_value)) => thunk_value.clone(),
@@ -114,23 +116,21 @@ impl Thunk {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct ThunkIdGen {
-    node_id: String,
-    next_id: usize,
+#[derive(Debug)]
+pub(crate) struct ThunkIdGen {
+    next_id: AtomicUsize,
 }
 
 impl ThunkIdGen {
     fn new(node_id: &str) -> Self {
         Self {
-            node_id: node_id.to_string(),
-            next_id: 0,
+            next_id: AtomicUsize::new(0),
         }
     }
 
-    fn generate(&mut self) -> String {
-        let id = format!("{}-{}", self.node_id, self.next_id);
-        self.next_id += 1;
+    pub fn generate(&self, node_id: &str) -> String {
+        let id = format!("{}-{}", node_id, self.next_id.load(Ordering::SeqCst));
+        self.next_id.fetch_add(1, Ordering::SeqCst);
         return id;
     }
 }
