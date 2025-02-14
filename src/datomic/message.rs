@@ -58,7 +58,7 @@ pub enum Body {
         value: serde_json::Value,
     },
     WriteOk {
-        msg_id: usize,
+        msg_id: Option<usize>,
         in_reply_to: usize,
     },
     Cas {
@@ -91,7 +91,7 @@ impl Body {
             Body::Read { msg_id, .. } => *msg_id,
             Body::ReadOk { msg_id, .. } => msg_id.unwrap(),
             Body::Write { msg_id, .. } => *msg_id,
-            Body::WriteOk { msg_id, .. } => *msg_id,
+            Body::WriteOk { msg_id, .. } => msg_id.unwrap(),
             Body::Cas { msg_id, .. } => *msg_id,
             Body::CasOk { msg_id, .. } => msg_id.unwrap(),
             Body::Error { .. } => panic!("error msgs have no msg id"), // this inidicates an issue with the body type. TODO cleaner design
@@ -108,7 +108,7 @@ impl Body {
             Body::Read { msg_id, .. } => *msg_id = new_id,
             Body::ReadOk { msg_id, .. } => *msg_id = Some(new_id),
             Body::Write { msg_id, .. } => *msg_id = new_id,
-            Body::WriteOk { msg_id, .. } => *msg_id = new_id,
+            Body::WriteOk { msg_id, .. } => *msg_id = Some(new_id),
             Body::Cas { msg_id, .. } => *msg_id = new_id,
             Body::CasOk { msg_id, .. } => *msg_id = Some(new_id),
             Body::Error { .. } => panic!("error msgs have no msg id"),

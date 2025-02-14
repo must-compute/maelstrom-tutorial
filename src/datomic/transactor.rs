@@ -57,7 +57,7 @@ impl Node {
         (Self { event_tx }, event_rx)
     }
 
-    async fn run(mut self, mut event_rx: Receiver<Event>, thunk_id_generator: ThunkIdGen) {
+    async fn run(self, mut event_rx: Receiver<Event>, thunk_id_generator: ThunkIdGen) {
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
 
         // event handler task
@@ -231,6 +231,12 @@ impl Node {
         response
     }
 
+    async fn node_id(&self) -> String {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        self.event_tx.send(Event::GetNodeId { tx }).await;
+        rx.await.unwrap()
+    }
+
     pub async fn transact(
         &self,
         thunk_id_generator: Arc<ThunkIdGen>,
@@ -238,6 +244,7 @@ impl Node {
     ) -> Result<Transaction> {
         let root = String::from("ROOT");
         let lin_kv = String::from("lin-kv");
+        let node_id = self.node_id().await;
 
         let read_msg_body = Body::Read {
             msg_id: 0,
@@ -253,7 +260,7 @@ impl Node {
             Body::Error { code, .. } => {
                 if code == ErrorCode::KeyDoesNotExist {
                     Thunk::new(
-                        thunk_id_generator.generate(),
+                        thunk_id_generator.generate(&node_id),
                         ThunkValue::Intermediate(Default::default()),
                     )
                 } else {
@@ -272,14 +279,12 @@ impl Node {
         for op in txn.iter_mut() {
             match op {
                 MicroOperation::Read { key, value } => {
-                    let mut thunk = local_map
-                        .get(key)
-                        .map(|v| v.to_owned())
-                        .expect("key in txn should exist");
-                    let ThunkValue::Ultimate(ultimate_value) = thunk.value(self).await else {
-                        panic!("reading a key from a map thunk should return an ultimate value")
-                    };
-                    *value = Some(ultimate_value);
+                    if let Some(mut thunk) = local_map.get(key).map(|v| v.to_owned()) {
+                        let ThunkValue::Ultimate(ultimate_value) = thunk.value(self).await else {
+                            panic!("reading a key from a map thunk should return an ultimate value")
+                        };
+                        *value = Some(ultimate_value);
+                    }
                 }
                 MicroOperation::Append { key, value } => {
                     // when life was easy:
@@ -287,17 +292,18 @@ impl Node {
                     // -----
                     // now life is hard:
                     let new_value = if let Some(thunk) = local_map.get_mut(key) {
-                        let ThunkValue::Ultimate(ultimate_value) = thunk.value(self).await else {
+                        let ThunkValue::Ultimate(ref mut ultimate_value) = thunk.value(self).await
+                        else {
                             panic!("reading a key from a map thunk should return an ultimate value")
                         };
                         ultimate_value.push(*value);
-                        ultimate_value
+                        ultimate_value.clone()
                     } else {
                         vec![*value]
                     };
 
                     let new_thunk = Thunk::new(
-                        thunk_id_generator.generate(),
+                        thunk_id_generator.generate(&node_id),
                         ThunkValue::Ultimate(new_value),
                     );
 
@@ -307,7 +313,7 @@ impl Node {
         }
 
         let mut new_thunk = Thunk::new(
-            thunk_id_generator.generate(),
+            thunk_id_generator.generate(&node_id),
             ThunkValue::Intermediate(local_map.clone()),
         );
         new_thunk.store(self).await;
@@ -338,8 +344,8 @@ impl Node {
     }
 }
 
-
 pub async fn run() {
     let (node, rx) = Node::new();
-    node.run(rx).await;
+    let thunk_id_generator = ThunkIdGen::new();
+    node.run(rx, thunk_id_generator).await;
 }

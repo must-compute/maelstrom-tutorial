@@ -11,10 +11,12 @@
 
 use std::{
     collections::HashMap,
+    fmt::Display,
+    str::FromStr,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::datomic::message::Body;
 
@@ -39,15 +41,35 @@ enum ThunkState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum ThunkValue {
+    #[serde(deserialize_with = "deserialize_intermediate_thunk")]
     Intermediate(HashMap<usize, Thunk>),
     Ultimate(Vec<usize>),
 }
 
+// deserialization function to convert the incoming HashMap<String, Thunk> to HashMap<usize, Thunk>
+fn deserialize_intermediate_thunk<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<usize, Thunk>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let string_keys_map: HashMap<String, Thunk> = HashMap::deserialize(deserializer)?;
+    string_keys_map
+        .into_iter()
+        .map(|(k, v)| Ok((usize::from_str(&k).map_err(serde::de::Error::custom)?, v)))
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Thunk {
-    id: ThunkId,
+    id: String,
     #[serde(skip_serializing)]
+    #[serde(default = "default_thunk_state")]
     state: ThunkState,
+}
+
+fn default_thunk_state() -> ThunkState {
+    ThunkState::InStorage(ValueState::NotEvaluated)
 }
 
 impl Thunk {
@@ -64,7 +86,8 @@ impl Thunk {
             ThunkState::NotInStorage(ref mut thunk_value) => {
                 if let ThunkValue::Intermediate(ref mut hash_map) = thunk_value {
                     for (_, v) in hash_map.iter_mut() {
-                        v.store(node);
+                        let pinned = Box::pin(v.store(node));
+                        pinned.await;
                     }
                 };
 
@@ -122,7 +145,7 @@ pub(crate) struct ThunkIdGen {
 }
 
 impl ThunkIdGen {
-    fn new(node_id: &str) -> Self {
+    pub fn new() -> Self {
         Self {
             next_id: AtomicUsize::new(0),
         }
