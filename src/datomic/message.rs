@@ -42,7 +42,7 @@ pub enum Body {
         txn: Vec<MicroOperation>,
         in_reply_to: usize,
     },
-    // lin-kv
+    // lin-kv, lww-kv
     Read {
         msg_id: usize,
         key: String, // technically it should be Any

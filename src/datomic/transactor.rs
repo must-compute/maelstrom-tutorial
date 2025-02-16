@@ -243,7 +243,7 @@ impl Node {
         mut txn: Transaction,
     ) -> Result<Transaction> {
         let root = String::from("ROOT");
-        let lin_kv = String::from("lin-kv");
+        let kv_store = String::from("lin-kv");
         let node_id = self.node_id().await;
 
         let read_msg_body = Body::Read {
@@ -251,11 +251,11 @@ impl Node {
             key: root.clone(),
         };
 
-        let response = self.sync_rpc(&lin_kv, &read_msg_body).await;
+        let response = self.sync_rpc(&kv_store, &read_msg_body).await;
 
         let kv_thunk: Thunk = match response.body {
             Body::ReadOk { value, .. } => {
-                serde_json::from_value(value).expect("lin-kv ReadOk should return a ThunkValue")
+                serde_json::from_value(value).expect("kv store ReadOk should return a ThunkValue")
             }
             Body::Error { code, .. } => {
                 if code == ErrorCode::KeyDoesNotExist {
@@ -264,10 +264,10 @@ impl Node {
                         ThunkValue::Intermediate(Default::default()),
                     )
                 } else {
-                    panic!("unexpected error code while reading from lin-kv");
+                    panic!("unexpected error code while reading from kv store");
                 }
             }
-            _ => panic!("something went wrong while reading from lin-kv"),
+            _ => panic!("something went wrong while reading from kv store"),
         };
 
         let mut local_snapshot = kv_thunk.clone(); // TODO what ids to alter?
@@ -327,7 +327,7 @@ impl Node {
             create_if_not_exists: true,
         };
 
-        let response = self.sync_rpc(&lin_kv, &cas_msg_body).await;
+        let response = self.sync_rpc(&kv_store, &cas_msg_body).await;
 
         if matches!(
             response.body,
