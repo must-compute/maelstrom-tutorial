@@ -47,6 +47,7 @@ pub enum Event {
 
 pub struct Node {
     event_tx: Sender<Event>,
+    pub kv_store: String,
     // pub id: String,
     // pub node_ids: Vec<String>, // Every node in the network (including this node)
 }
@@ -54,7 +55,13 @@ pub struct Node {
 impl Node {
     fn new() -> (Self, Receiver<Event>) {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(32);
-        (Self { event_tx }, event_rx)
+        (
+            Self {
+                event_tx,
+                kv_store: "lww-kv".to_string(),
+            },
+            event_rx,
+        )
     }
 
     async fn run(self, mut event_rx: Receiver<Event>, thunk_id_generator: ThunkIdGen) {
@@ -243,7 +250,6 @@ impl Node {
         mut txn: Transaction,
     ) -> Result<Transaction> {
         let root = String::from("ROOT");
-        let kv_store = String::from("lin-kv");
         let node_id = self.node_id().await;
 
         let read_msg_body = Body::Read {
@@ -251,7 +257,7 @@ impl Node {
             key: root.clone(),
         };
 
-        let response = self.sync_rpc(&kv_store, &read_msg_body).await;
+        let response = self.sync_rpc(&self.kv_store, &read_msg_body).await;
 
         let kv_thunk: Thunk = match response.body {
             Body::ReadOk { value, .. } => {
@@ -327,7 +333,7 @@ impl Node {
             create_if_not_exists: true,
         };
 
-        let response = self.sync_rpc(&kv_store, &cas_msg_body).await;
+        let response = self.sync_rpc(&self.kv_store, &cas_msg_body).await;
 
         if matches!(
             response.body,

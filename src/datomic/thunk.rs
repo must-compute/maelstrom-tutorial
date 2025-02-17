@@ -93,7 +93,7 @@ impl Thunk {
 
                 let response = node
                     .sync_rpc(
-                        "lin-kv",
+                        &node.kv_store,
                         &Body::Write {
                             msg_id: 1,
                             key: self.id.clone(),
@@ -119,7 +119,7 @@ impl Thunk {
             ThunkState::InStorage(ValueState::NotEvaluated) => {
                 let response = node
                     .sync_rpc(
-                        "lin-kv",
+                        &node.kv_store,
                         &Body::Read {
                             msg_id: 1,
                             key: self.id.clone(),
