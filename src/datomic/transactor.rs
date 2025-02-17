@@ -265,10 +265,32 @@ impl Node {
             }
             Body::Error { code, .. } => {
                 if code == ErrorCode::KeyDoesNotExist {
-                    Thunk::new(
+                    // 1. make a local thunk
+                    // 2. store it                                    kv: { "n1-1": {} }
+                    // 3. make ROOT and associate with thunk             // { "ROOT": initial_root_value }
+                    let mut initial_root_value = Thunk::new(
                         thunk_id_generator.generate(&node_id),
                         ThunkValue::Intermediate(Default::default()),
-                    )
+                    );
+
+                    initial_root_value.store(self).await;
+
+                    let response = self
+                        .sync_rpc(
+                            &self.kv_store,
+                            &Body::Write {
+                                msg_id: 1,
+                                key: root.clone(),
+                                value: serde_json::to_value(initial_root_value.clone()).unwrap(),
+                            },
+                        )
+                        .await;
+
+                    if !matches!(response.body, Body::WriteOk { .. }) {
+                        panic!();
+                    }
+
+                    initial_root_value
                 } else {
                     panic!("unexpected error code while reading from kv store");
                 }
@@ -330,7 +352,7 @@ impl Node {
             key: root.clone(),
             from: serde_json::to_value(kv_thunk).unwrap(),
             to: serde_json::to_value(new_thunk).unwrap(),
-            create_if_not_exists: true,
+            create_if_not_exists: true, // only supported by lin-kv
         };
 
         let response = self.sync_rpc(&self.kv_store, &cas_msg_body).await;
