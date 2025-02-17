@@ -14,6 +14,7 @@ use std::{
     fmt::Display,
     str::FromStr,
     sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -116,7 +117,7 @@ impl Thunk {
             ThunkState::NotInStorage(thunk_value)
             | ThunkState::InStorage(ValueState::Evaluated(thunk_value)) => thunk_value.clone(),
 
-            ThunkState::InStorage(ValueState::NotEvaluated) => {
+            ThunkState::InStorage(ValueState::NotEvaluated) => loop {
                 let response = node
                     .sync_rpc(
                         &node.kv_store,
@@ -132,9 +133,9 @@ impl Thunk {
                     self.state = ThunkState::InStorage(ValueState::Evaluated(thunk_value.clone()));
                     return thunk_value;
                 } else {
-                    panic!("we couldnt read");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }
+            },
         }
     }
 }
