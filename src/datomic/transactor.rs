@@ -1,4 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
 
 use crate::datomic::message::{Body, ErrorCode};
 use anyhow::Result;
@@ -47,6 +54,8 @@ pub enum Event {
 
 pub struct Node {
     event_tx: Sender<Event>,
+    pub kv_store: String,
+    root_created: AtomicBool,
     // pub id: String,
     // pub node_ids: Vec<String>, // Every node in the network (including this node)
 }
@@ -54,7 +63,14 @@ pub struct Node {
 impl Node {
     fn new() -> (Self, Receiver<Event>) {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(32);
-        (Self { event_tx }, event_rx)
+        (
+            Self {
+                event_tx,
+                kv_store: "lww-kv".to_string(),
+                root_created: false.into(),
+            },
+            event_rx,
+        )
     }
 
     async fn run(self, mut event_rx: Receiver<Event>, thunk_id_generator: ThunkIdGen) {
@@ -243,7 +259,6 @@ impl Node {
         mut txn: Transaction,
     ) -> Result<Transaction> {
         let root = String::from("ROOT");
-        let lin_kv = String::from("lin-kv");
         let node_id = self.node_id().await;
 
         let read_msg_body = Body::Read {
@@ -251,24 +266,66 @@ impl Node {
             key: root.clone(),
         };
 
-        let response = self.sync_rpc(&lin_kv, &read_msg_body).await;
-
-        let kv_thunk: Thunk = match response.body {
-            Body::ReadOk { value, .. } => {
-                serde_json::from_value(value).expect("lin-kv ReadOk should return a ThunkValue")
-            }
-            Body::Error { code, .. } => {
-                if code == ErrorCode::KeyDoesNotExist {
-                    Thunk::new(
-                        thunk_id_generator.generate(&node_id),
-                        ThunkValue::Intermediate(Default::default()),
-                    )
-                } else {
-                    panic!("unexpected error code while reading from lin-kv");
+        let response = self.sync_rpc(&self.kv_store, &read_msg_body).await;
+        let kv_thunk: Thunk;
+        loop {
+            match response.body {
+                Body::ReadOk { value, .. } => {
+                    kv_thunk = serde_json::from_value(value)
+                        .expect("kv store ReadOk should return a ThunkValue");
+                    break;
                 }
-            }
-            _ => panic!("something went wrong while reading from lin-kv"),
-        };
+                Body::Error { ref code, .. } => {
+                    if *code == ErrorCode::KeyDoesNotExist {
+                        // 1. make a local thunk
+                        // 2. store it                                    kv: { "n1-1": {} }
+                        // 3. make ROOT and associate with thunk             // { "ROOT": initial_root_value }
+
+                        // If node_id = n0, then I'm the leader
+                        // If the root doesn't exist I should create it.
+                        // If the state of "root_established" is true:
+                        //      -> wait on the value.
+
+                        // If i'm not node_id = n0, then I just wait for the value
+                        // (or ask the leader to create it...)
+                        if self.node_id().await == "n0" && !self.root_created.load(Ordering::SeqCst)
+                        {
+                            let mut initial_root_value = Thunk::new(
+                                thunk_id_generator.generate(&node_id),
+                                ThunkValue::Intermediate(Default::default()),
+                            );
+
+                            initial_root_value.store(self).await;
+
+                            let response = self
+                                .sync_rpc(
+                                    &self.kv_store,
+                                    &Body::Write {
+                                        msg_id: 1,
+                                        key: root.clone(),
+                                        value: serde_json::to_value(initial_root_value.clone())
+                                            .unwrap(),
+                                    },
+                                )
+                                .await;
+
+                            if matches!(response.body, Body::WriteOk { .. }) {
+                                self.root_created.store(true, Ordering::SeqCst);
+                            } else {
+                                panic!();
+                            }
+                            kv_thunk = initial_root_value;
+                            break;
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    } else {
+                        panic!("unexpected error code while reading from kv store");
+                    }
+                }
+                _ => panic!("something went wrong while reading from kv store"),
+            };
+        }
 
         let mut local_snapshot = kv_thunk.clone(); // TODO what ids to alter?
 
@@ -324,10 +381,10 @@ impl Node {
             key: root.clone(),
             from: serde_json::to_value(kv_thunk).unwrap(),
             to: serde_json::to_value(new_thunk).unwrap(),
-            create_if_not_exists: true,
+            create_if_not_exists: true, // only supported by lin-kv
         };
 
-        let response = self.sync_rpc(&lin_kv, &cas_msg_body).await;
+        let response = self.sync_rpc(&self.kv_store, &cas_msg_body).await;
 
         if matches!(
             response.body,

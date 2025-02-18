@@ -42,7 +42,7 @@ pub enum Body {
         txn: Vec<MicroOperation>,
         in_reply_to: usize,
     },
-    // lin-kv
+    // lin-kv, lww-kv
     Read {
         msg_id: usize,
         key: String, // technically it should be Any
@@ -66,7 +66,7 @@ pub enum Body {
         key: String, // technically it should be Any
         from: serde_json::Value,
         to: serde_json::Value,
-        create_if_not_exists: bool,
+        create_if_not_exists: bool, //NOTE: this is only supported by lin-kv, not lww-kv.
     },
     CasOk {
         msg_id: Option<usize>,
