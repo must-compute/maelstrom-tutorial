@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -12,12 +12,11 @@ use anyhow::Result;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::{
+    event::{Command, Event, Query},
     message::{Message, Transaction},
     micro_op::MicroOperation,
     thunk::{Thunk, ThunkIdGen, ThunkValue},
 };
-
-type ResponseNotifier = tokio::sync::oneshot::Sender<Message>;
 
 #[derive(Debug)]
 enum DatomicError {
@@ -33,24 +32,6 @@ impl std::fmt::Display for DatomicError {
 }
 
 impl std::error::Error for DatomicError {}
-
-// events that handle() will generate
-pub enum Event {
-    Send {
-        message: Message,
-        notifier: Option<ResponseNotifier>,
-    },
-    Received {
-        response: Message,
-    },
-    Init {
-        id: String,
-        node_ids: Vec<String>,
-    },
-    GetNodeId {
-        tx: tokio::sync::oneshot::Sender<String>,
-    },
-}
 
 pub struct Node {
     event_tx: Sender<Event>,
@@ -78,38 +59,57 @@ impl Node {
 
         // event handler task
         tokio::spawn(async move {
-            let mut unacked: HashMap<usize, ResponseNotifier> = Default::default();
+            let mut unacked: HashMap<usize, tokio::sync::oneshot::Sender<Message>> =
+                Default::default();
             let mut node_id: String = Default::default();
-            let mut ids: Vec<String> = Default::default();
+            // let mut _ids: Vec<String> = Default::default();
             let mut next_msg_id = 0;
 
             while let Some(event) = event_rx.recv().await {
                 match event {
-                    Event::Init { id, node_ids } => {
+                    Event::Cast(Command::Init { id, .. }) => {
                         node_id = id;
-                        ids = node_ids;
+                        // _ids = node_ids;
                     }
-                    Event::GetNodeId { tx } => tx.send(node_id.clone()).unwrap(),
-                    Event::Send {
-                        mut message,
-                        notifier,
-                    } => {
+                    Event::Call(Query::GetNodeId { responder }) => {
+                        responder.send(node_id.clone()).unwrap()
+                    }
+                    Event::Call(Query::SendViaMaelstrom { ref message, .. })
+                    | Event::Cast(Command::SendViaMaelstrom { ref message }) => {
+                        let mut message = message.clone();
                         if !matches!(message.body, Body::TxnOk { .. })
                             && !matches!(message.body, Body::Error { .. })
                         {
                             message.body.set_msg_id(next_msg_id);
                             next_msg_id += 1;
+                            dbg!(next_msg_id);
                         }
                         println!("{}", serde_json::to_string(&message).unwrap());
-                        if let Some(notifier) = notifier {
-                            unacked.insert(message.body.msg_id(), notifier);
-                        }
+
+                        match event {
+                            Event::Call(Query::SendViaMaelstrom { responder, .. }) => {
+                                // TODO i dont like this at all, because     ^message
+                                //      will have an old msg id if captured, due to shadowing
+                                let msg_id = message.body.msg_id();
+                                unacked.insert(msg_id, responder);
+                                dbg!(&unacked);
+                            }
+                            _ => (),
+                        };
                     }
-                    Event::Received { response } => {
+                    Event::Cast(Command::ReceivedViaMaelstrom { response }) => {
+                        eprintln!("RECEIVED VIA MAELSTROM {:?}", response);
+                        eprintln!("UNACKED BEFORE REMOVAL {:?}", unacked);
                         // we received an ack, so we notify and remove from unacked.
                         if let Some(notifier) = unacked.remove(&response.body.in_reply_to()) {
+                            eprintln!("UNACKED DURING REMOVAL {:?}", unacked);
                             notifier.send(response).unwrap();
                         }
+                        eprintln!("UNACKED AFTER REMOVAL BLOCK {:?}", unacked);
+                    }
+                    Event::Call(Query::ReserveMsgId { responder: tx }) => {
+                        tx.send(next_msg_id).unwrap();
+                        next_msg_id += 1;
                     }
                 }
             }
@@ -159,10 +159,10 @@ impl Node {
                 node_ids,
             } => {
                 self.event_tx
-                    .send(Event::Init {
+                    .send(Event::Cast(Command::Init {
                         id: node_id.clone(),
                         node_ids: node_ids.clone(),
-                    })
+                    }))
                     .await
                     .unwrap();
 
@@ -210,20 +210,25 @@ impl Node {
             }
             _ => {
                 self.event_tx
-                    .send(Event::Received {
+                    .send(Event::Cast(Command::ReceivedViaMaelstrom {
                         response: msg.clone(),
-                    })
+                    }))
                     .await
                     .unwrap();
             }
         }
     }
 
-    pub async fn send(&self, notifier: Option<ResponseNotifier>, dest: &str, body: &Body) {
+    pub async fn send(
+        &self,
+        responder: Option<tokio::sync::oneshot::Sender<Message>>,
+        dest: &str,
+        body: &Body,
+    ) {
         let (id_tx, id_rx) = tokio::sync::oneshot::channel::<String>();
 
         self.event_tx
-            .send(Event::GetNodeId { tx: id_tx })
+            .send(Event::Call(Query::GetNodeId { responder: id_tx }))
             .await
             .unwrap();
 
@@ -233,23 +238,30 @@ impl Node {
             body: body.clone(),
         };
 
-        self.event_tx
-            .send(Event::Send { message, notifier })
-            .await
-            .unwrap();
+        let event = if let Some(responder) = responder {
+            Event::Call(Query::SendViaMaelstrom { message, responder })
+        } else {
+            Event::Cast(Command::SendViaMaelstrom { message })
+        };
+        self.event_tx.send(event).await.unwrap();
     }
 
     // blocks until obtaining the response Message
     pub async fn sync_rpc(&self, dest: &str, msg_body: &Body) -> Message {
         let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
         self.send(Some(notifier_tx), dest, msg_body).await;
+        eprintln!("REACHED");
         let response = notifier_rx.await.unwrap();
+        eprintln!("NOT REACHED");
         response
     }
 
     async fn node_id(&self) -> String {
         let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-        self.event_tx.send(Event::GetNodeId { tx }).await;
+        self.event_tx
+            .send(Event::Call(Query::GetNodeId { responder: tx }))
+            .await
+            .unwrap();
         rx.await.unwrap()
     }
 
@@ -277,17 +289,6 @@ impl Node {
                 }
                 Body::Error { ref code, .. } => {
                     if *code == ErrorCode::KeyDoesNotExist {
-                        // 1. make a local thunk
-                        // 2. store it                                    kv: { "n1-1": {} }
-                        // 3. make ROOT and associate with thunk             // { "ROOT": initial_root_value }
-
-                        // If node_id = n0, then I'm the leader
-                        // If the root doesn't exist I should create it.
-                        // If the state of "root_established" is true:
-                        //      -> wait on the value.
-
-                        // If i'm not node_id = n0, then I just wait for the value
-                        // (or ask the leader to create it...)
                         if self.node_id().await == "n0" && !self.root_created.load(Ordering::SeqCst)
                         {
                             let mut initial_root_value = Thunk::new(
@@ -310,7 +311,7 @@ impl Node {
                                 .await;
 
                             if matches!(response.body, Body::WriteOk { .. }) {
-                                self.root_created.store(true, Ordering::SeqCst);
+                                dbg!(self.root_created.store(true, Ordering::SeqCst));
                             } else {
                                 panic!();
                             }
@@ -327,7 +328,7 @@ impl Node {
             };
         }
 
-        let mut local_snapshot = kv_thunk.clone(); // TODO what ids to alter?
+        let mut local_snapshot = kv_thunk.clone();
 
         let ThunkValue::Intermediate(ref mut local_map) = local_snapshot.value(self).await else {
             panic!("expected a map thunk on the first read")
@@ -344,10 +345,6 @@ impl Node {
                     }
                 }
                 MicroOperation::Append { key, value } => {
-                    // when life was easy:
-                    // local_snapshot.entry(*key).or_insert(vec![]).push(*value)
-                    // -----
-                    // now life is hard:
                     let new_value = if let Some(thunk) = local_map.get_mut(key) {
                         let ThunkValue::Ultimate(ref mut ultimate_value) = thunk.value(self).await
                         else {
