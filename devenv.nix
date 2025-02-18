@@ -13,6 +13,7 @@
     pkgs.wget
     pkgs.delta
     pkgs.tree
+    pkgs.glibcLocales
   ];
 
   # https://devenv.sh/languages/
