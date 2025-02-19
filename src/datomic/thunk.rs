@@ -96,7 +96,7 @@ impl Thunk {
                     .sync_rpc(
                         &node.kv_store,
                         &Body::Write {
-                            msg_id: 1,
+                            msg_id: node.reserve_msg_id().await,
                             key: self.id.clone(),
                             value: serde_json::to_value(thunk_value.clone()).unwrap(),
                         },
@@ -122,7 +122,7 @@ impl Thunk {
                     .sync_rpc(
                         &node.kv_store,
                         &Body::Read {
-                            msg_id: 1,
+                            msg_id: node.reserve_msg_id().await,
                             key: self.id.clone(),
                         },
                     )

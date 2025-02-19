@@ -78,12 +78,12 @@ impl Node {
                     Event::Call(Query::SendViaMaelstrom { ref message, .. })
                     | Event::Cast(Command::SendViaMaelstrom { ref message }) => {
                         let mut message = message.clone();
-                        if !matches!(message.body, Body::TxnOk { .. })
-                            && !matches!(message.body, Body::Error { .. })
-                        {
-                            message.body.set_msg_id(next_msg_id);
-                            next_msg_id += 1;
-                        }
+                        // if !matches!(message.body, Body::TxnOk { .. })
+                        //     && !matches!(message.body, Body::Error { .. })
+                        // {
+                        //     message.body.set_msg_id(next_msg_id);
+                        //     next_msg_id += 1;
+                        // }
                         println!(
                             "{}",
                             serde_json::to_string(&message)
@@ -105,7 +105,9 @@ impl Node {
                     Event::Cast(Command::ReceivedViaMaelstrom { response }) => {
                         // we received an ack, so we notify and remove from unacked.
                         if let Some(notifier) = unacked.remove(&response.body.in_reply_to()) {
-                            notifier.send(response).expect("returning msg ack should work over the oneshot channel");
+                            notifier
+                                .send(response)
+                                .expect("returning msg ack should work over the oneshot channel");
                         }
                     }
                     Event::Call(Query::ReserveMsgId { responder: tx }) => {
@@ -257,6 +259,15 @@ impl Node {
         response
     }
 
+    pub async fn reserve_msg_id(&self) -> usize {
+        let (tx, rx) = tokio::sync::oneshot::channel::<usize>();
+        self.event_tx
+            .send(Event::Call(Query::ReserveMsgId { responder: tx }))
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
     async fn node_id(&self) -> String {
         let (tx, rx) = tokio::sync::oneshot::channel::<String>();
         self.event_tx
@@ -277,7 +288,7 @@ impl Node {
         let node_id = self.node_id().await;
 
         let read_msg_body = Body::Read {
-            msg_id: 0,
+            msg_id: self.reserve_msg_id().await,
             key: root.clone(),
         };
 
@@ -306,7 +317,7 @@ impl Node {
                                 .sync_rpc(
                                     &self.kv_store,
                                     &Body::Write {
-                                        msg_id: 1,
+                                        msg_id: self.reserve_msg_id().await,
                                         key: root.clone(),
                                         value: serde_json::to_value(initial_root_value.clone())
                                             .unwrap(),
@@ -378,7 +389,7 @@ impl Node {
 
         // cas
         let cas_msg_body = Body::Cas {
-            msg_id: 0,
+            msg_id: self.reserve_msg_id().await,
             key: root.clone(),
             from: serde_json::to_value(kv_thunk).unwrap(),
             to: serde_json::to_value(new_thunk).unwrap(),
