@@ -33,6 +33,7 @@ impl std::fmt::Display for DatomicError {
 
 impl std::error::Error for DatomicError {}
 
+#[derive(Debug)]
 pub struct Node {
     event_tx: Sender<Event>,
     pub kv_store: String,
@@ -71,9 +72,9 @@ impl Node {
                         node_id = id;
                         // _ids = node_ids;
                     }
-                    Event::Call(Query::GetNodeId { responder }) => {
-                        responder.send(node_id.clone()).unwrap()
-                    }
+                    Event::Call(Query::GetNodeId { responder }) => responder
+                        .send(node_id.clone())
+                        .expect("respond to Query::GetNodeId"),
                     Event::Call(Query::SendViaMaelstrom { ref message, .. })
                     | Event::Cast(Command::SendViaMaelstrom { ref message }) => {
                         let mut message = message.clone();
@@ -82,9 +83,14 @@ impl Node {
                         {
                             message.body.set_msg_id(next_msg_id);
                             next_msg_id += 1;
-                            dbg!(next_msg_id);
                         }
-                        println!("{}", serde_json::to_string(&message).unwrap());
+                        println!(
+                            "{}",
+                            serde_json::to_string(&message)
+                                .expect("msg being sent to STDOUT should be serializable to JSON")
+                        );
+
+                        tracing::debug!("sent msg {:?}", &message);
 
                         match event {
                             Event::Call(Query::SendViaMaelstrom { responder, .. }) => {
@@ -92,20 +98,15 @@ impl Node {
                                 //      will have an old msg id if captured, due to shadowing
                                 let msg_id = message.body.msg_id();
                                 unacked.insert(msg_id, responder);
-                                dbg!(&unacked);
                             }
                             _ => (),
                         };
                     }
                     Event::Cast(Command::ReceivedViaMaelstrom { response }) => {
-                        eprintln!("RECEIVED VIA MAELSTROM {:?}", response);
-                        eprintln!("UNACKED BEFORE REMOVAL {:?}", unacked);
                         // we received an ack, so we notify and remove from unacked.
                         if let Some(notifier) = unacked.remove(&response.body.in_reply_to()) {
-                            eprintln!("UNACKED DURING REMOVAL {:?}", unacked);
-                            notifier.send(response).unwrap();
+                            notifier.send(response).expect("returning msg ack should work over the oneshot channel");
                         }
-                        eprintln!("UNACKED AFTER REMOVAL BLOCK {:?}", unacked);
                     }
                     Event::Call(Query::ReserveMsgId { responder: tx }) => {
                         tx.send(next_msg_id).unwrap();
@@ -127,7 +128,7 @@ impl Node {
 
                 let json_msg = serde_json::from_str(&input)
                     .expect(&format!("should take a JSON message. Got {:?}", input));
-                eprintln!("received json msg: {:?}", json_msg);
+                tracing::debug!("received json msg: {:?}", json_msg);
                 stdin_tx.send(json_msg).await.unwrap();
                 input.clear();
             }
@@ -151,6 +152,7 @@ impl Node {
     }
 
     // TODO this can now be a free function (now that Node is useless)
+    // #[tracing::instrument]
     async fn handle(&self, thunk_id_generator: Arc<ThunkIdGen>, msg: &Message) {
         match &msg.body {
             Body::Init {
@@ -177,6 +179,7 @@ impl Node {
                 .await;
             }
             Body::Txn { txn, .. } => {
+                tracing::debug!("handle() received Body::Txn");
                 let txn_result = self.transact(thunk_id_generator, txn.clone()).await;
 
                 match txn_result {
@@ -250,9 +253,7 @@ impl Node {
     pub async fn sync_rpc(&self, dest: &str, msg_body: &Body) -> Message {
         let (notifier_tx, notifier_rx) = tokio::sync::oneshot::channel::<Message>();
         self.send(Some(notifier_tx), dest, msg_body).await;
-        eprintln!("REACHED");
         let response = notifier_rx.await.unwrap();
-        eprintln!("NOT REACHED");
         response
     }
 
@@ -265,11 +266,13 @@ impl Node {
         rx.await.unwrap()
     }
 
+    #[tracing::instrument]
     pub async fn transact(
         &self,
         thunk_id_generator: Arc<ThunkIdGen>,
         mut txn: Transaction,
     ) -> Result<Transaction> {
+        tracing::debug!("transact() was called");
         let root = String::from("ROOT");
         let node_id = self.node_id().await;
 
@@ -278,9 +281,9 @@ impl Node {
             key: root.clone(),
         };
 
-        let response = self.sync_rpc(&self.kv_store, &read_msg_body).await;
         let kv_thunk: Thunk;
         loop {
+            let response = self.sync_rpc(&self.kv_store, &read_msg_body).await;
             match response.body {
                 Body::ReadOk { value, .. } => {
                     kv_thunk = serde_json::from_value(value)
@@ -288,6 +291,7 @@ impl Node {
                     break;
                 }
                 Body::Error { ref code, .. } => {
+                    tracing::debug!("RECEIVED RESPONSE, CONTAINS ERROR");
                     if *code == ErrorCode::KeyDoesNotExist {
                         if self.node_id().await == "n0" && !self.root_created.load(Ordering::SeqCst)
                         {
@@ -311,7 +315,7 @@ impl Node {
                                 .await;
 
                             if matches!(response.body, Body::WriteOk { .. }) {
-                                dbg!(self.root_created.store(true, Ordering::SeqCst));
+                                self.root_created.store(true, Ordering::SeqCst);
                             } else {
                                 panic!();
                             }
@@ -381,20 +385,24 @@ impl Node {
             create_if_not_exists: true, // only supported by lin-kv
         };
 
-        let response = self.sync_rpc(&self.kv_store, &cas_msg_body).await;
-
-        if matches!(
-            response.body,
-            Body::Error {
-                code: ErrorCode::PreconditionFailed,
-                ..
-            }
-        ) {
-            let err = anyhow::Error::new(DatomicError::TransactionConflict);
-            return Err(err);
+        loop {
+            let response = self.sync_rpc(&self.kv_store, &cas_msg_body).await;
+            match response.body {
+                Body::CasOk { .. } => return Ok(txn),
+                Body::Error {
+                    code: ErrorCode::PreconditionFailed,
+                    ..
+                } => {
+                    let err = anyhow::Error::new(DatomicError::TransactionConflict);
+                    return Err(err);
+                }
+                Body::Error {
+                    code: ErrorCode::KeyDoesNotExist,
+                    ..
+                } => tokio::time::sleep(Duration::from_millis(10)).await,
+                _ => panic!("unhandled error on CAS failure"),
+            };
         }
-
-        Ok(txn)
     }
 }
 

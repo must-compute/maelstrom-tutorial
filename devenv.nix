@@ -14,6 +14,7 @@
     pkgs.delta
     pkgs.tree
     pkgs.glibcLocales
+    pkgs.lnav
   ];
 
   # https://devenv.sh/languages/
@@ -50,6 +51,10 @@
 
     echo "updated local config in .git/config"
 '';
+
+  scripts.logs.exec = ''
+    lnav  store/latest/node-logs/
+     '';
 
   enterShell = ''
     hello
