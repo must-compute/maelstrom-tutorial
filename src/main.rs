@@ -3,6 +3,7 @@ mod crdt;
 mod datomic;
 mod maelstrom;
 mod maelstrom_generic;
+mod raft;
 
 #[tokio::main]
 async fn main() {
