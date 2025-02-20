@@ -204,11 +204,14 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
                         value: serde_json::to_value(&value)
                             .expect("value should be serializable to json"),
                     },
-                    None => Body::Error {
-                        in_reply_to: msg_id,
-                        code: ErrorCode::KeyDoesNotExist,
-                        text: "key does not exist".to_string(),
-                    },
+                    None => {
+                        let err = ErrorCode::KeyDoesNotExist;
+                        Body::Error {
+                            in_reply_to: msg_id,
+                            code: err.clone(),
+                            text: err.to_string(),
+                        }
+                    }
                 },
             )
             .await
@@ -271,7 +274,7 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
                         | Some(e @ ErrorCode::KeyDoesNotExist) => Body::Error {
                             in_reply_to: msg_id,
                             code: e.clone(),
-                            text: "key does not exist".to_string(),
+                            text: e.to_string(),
                         },
                         _ => panic!("encountered an unexpected error while processing Cas request"),
                     },
