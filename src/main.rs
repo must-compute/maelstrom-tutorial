@@ -18,5 +18,5 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    datomic::transactor::run().await;
+    raft::raft::run().await;
 }

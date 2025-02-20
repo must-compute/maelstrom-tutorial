@@ -23,7 +23,7 @@ pub enum Body {
     // lin-kv, lww-kv
     Read {
         msg_id: usize,
-        key: String, // technically it should be Any
+        key: usize, // technically it should be Any
     },
     ReadOk {
         msg_id: Option<usize>,
@@ -32,7 +32,7 @@ pub enum Body {
     },
     Write {
         msg_id: usize,
-        key: String, // technically it should be Any
+        key: usize, // technically it should be Any
         value: serde_json::Value,
     },
     WriteOk {
@@ -41,7 +41,7 @@ pub enum Body {
     },
     Cas {
         msg_id: usize,
-        key: String, // technically it should be Any
+        key: usize, // technically it should be Any
         from: serde_json::Value,
         to: serde_json::Value,
     },
@@ -95,3 +95,21 @@ pub enum ErrorCode {
     PreconditionFailed = 22,
     TxnConflict = 30,
 }
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErrorCode::Timeout => write!(f, "timeout"),
+            ErrorCode::NotSupported => write!(f, "not supported"),
+            ErrorCode::TemporarilyUnavailable => write!(f, "temporarily unavailable"),
+            ErrorCode::MalformedRequest => write!(f, "malformed request"),
+            ErrorCode::Crash => write!(f, "crash"),
+            ErrorCode::Abort => write!(f, "abort"),
+            ErrorCode::KeyDoesNotExist => write!(f, "key does not exist"),
+            ErrorCode::PreconditionFailed => write!(f, "precondition failed"),
+            ErrorCode::TxnConflict => write!(f, "txn conflict"),
+        }
+    }
+}
+
+impl std::error::Error for ErrorCode {}

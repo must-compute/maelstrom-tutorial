@@ -1,4 +1,7 @@
-use super::message::Message;
+use super::{
+    message::Message,
+    raft::{StateMachineKey, StateMachineValue},
+};
 
 // TODO use Result<T, Error>
 type ChannelResponder<T> = tokio::sync::oneshot::Sender<T>;
@@ -21,21 +24,31 @@ pub enum Query {
         responder: ChannelResponder<Message>,
     },
     KVRead {
-        key: String,
-        responder: ChannelResponder<Option<String>>,
+        key: StateMachineKey,
+        responder: ChannelResponder<Option<StateMachineValue>>,
     },
     KVCas {
-        key: String,
-        from: String,
-        to: String,
-        responder: ChannelResponder<anyhow::Result<String>>,
+        key: StateMachineKey,
+        from: StateMachineValue,
+        to: StateMachineValue,
+        responder: ChannelResponder<anyhow::Result<()>>,
     },
 }
 
 // for events with no expected response
 pub enum Command {
-    Init { id: String, node_ids: Vec<String> },
-    ReceivedViaMaelstrom { response: Message },
-    SendViaMaelstrom { message: Message },
-    KVWrite { key: usize, value: usize },
+    Init {
+        id: String,
+        node_ids: Vec<String>,
+    },
+    ReceivedViaMaelstrom {
+        response: Message,
+    },
+    SendViaMaelstrom {
+        message: Message,
+    },
+    KVWrite {
+        key: StateMachineKey,
+        value: StateMachineValue,
+    },
 }

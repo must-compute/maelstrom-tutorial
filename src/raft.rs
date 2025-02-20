@@ -1,3 +1,3 @@
 mod event;
 mod message;
-mod raft;
+pub mod raft;

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use tokio::sync::mpsc::Sender;
 
@@ -7,30 +8,43 @@ use super::{
     message::{Body, ErrorCode, Message},
 };
 
-struct KeyValueStore {
-    map: HashMap<String, String>,
+pub type StateMachineKey = usize;
+pub type StateMachineValue = usize;
+
+#[derive(Default)]
+struct KeyValueStore<K, V>
+where
+    K: Hash + Eq,
+    V: PartialEq,
+{
+    map: HashMap<K, V>,
 }
 
-impl KeyValueStore {
-    pub fn read(&self, key: &str) -> Option<String> {
-        self.map.get(key).map(|s| s.to_owned())
+impl<K, V> KeyValueStore<K, V>
+where
+    K: Hash + Eq,
+    V: PartialEq,
+{
+    pub fn read(&self, key: &K) -> Option<&V> {
+        self.map.get(key)
     }
 
-    pub fn write(&mut self, key: String, value: String) {
+    pub fn write(&mut self, key: K, value: V) {
         self.map.insert(key, value);
     }
 
-    pub fn cas(&mut self, key: String, from: String, to: String) {
+    pub fn cas(&mut self, key: K, from: V, to: V) -> anyhow::Result<()> {
         let res = self.map.get_mut(&key);
 
         match res {
             Some(current) => {
                 if *current != from {
-                    panic!("from != current");
+                    return Err(anyhow::Error::new(ErrorCode::PreconditionFailed));
                 }
-                *current = to
+                *current = to;
+                Ok(())
             }
-            None => panic!("key does not exist"),
+            None => Err(anyhow::Error::new(ErrorCode::KeyDoesNotExist)),
         }
     }
 }
@@ -45,6 +59,7 @@ pub async fn run() {
         let mut node_id: String = Default::default();
         let mut _ids: Vec<String> = Default::default();
         let mut next_msg_id = 0;
+        let state_machine: KeyValueStore<usize, usize> = Default::default();
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -88,7 +103,11 @@ pub async fn run() {
                     tx.send(next_msg_id).unwrap();
                     next_msg_id += 1;
                 }
-                Event::Call(Query::KVRead { key, responder }) => {}
+                Event::Call(Query::KVRead { key, responder }) => {
+                    responder
+                        .send(state_machine.read(&key).map(|v| v.to_owned()))
+                        .expect("should be able to respond to KVRead over oneshot channel");
+                }
                 Event::Cast(Command::KVWrite { key, value }) => {}
                 Event::Call(Query::KVCas {
                     key,
@@ -134,7 +153,9 @@ pub async fn run() {
 async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
     match msg.body {
         Body::Init {
-            node_id, node_ids, ..
+            msg_id,
+            node_id,
+            node_ids,
         } => {
             event_tx
                 .send(Event::Cast(Command::Init {
@@ -143,9 +164,20 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
                 }))
                 .await
                 .expect("should be able to send Init event");
+
+            send(
+                event_tx.clone(),
+                None,
+                msg.src,
+                Body::InitOk {
+                    msg_id: Some(reserve_msg_id(event_tx).await),
+                    in_reply_to: msg_id,
+                },
+            )
+            .await;
         }
         Body::Read { msg_id, key } => {
-            let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+            let (tx, rx) = tokio::sync::oneshot::channel::<Option<StateMachineValue>>();
             event_tx
                 .send(Event::Call(Query::KVRead { key, responder: tx }))
                 .await
@@ -174,14 +206,72 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
             )
             .await
         }
-        Body::Write { msg_id, key, value } => todo!(),
+        Body::Write { msg_id, key, value } => {
+            let value =
+                serde_json::from_value(value).expect("Write msg should contain valid value");
+            event_tx
+                .send(Event::Cast(Command::KVWrite { key, value }))
+                .await
+                .expect("should be able to send Write event");
+
+            send(
+                event_tx.clone(),
+                None,
+                msg.src,
+                Body::WriteOk {
+                    msg_id: Some(reserve_msg_id(event_tx).await),
+                    in_reply_to: msg_id,
+                },
+            )
+            .await
+        }
         Body::Cas {
             msg_id,
             key,
             from,
             to,
-        } => todo!(),
+        } => {
+            let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+            let from =
+                serde_json::from_value(from).expect("cas from should have a deserializable value");
+            let to = serde_json::from_value(to).expect("cas to should have a deserializable value");
 
+            event_tx
+                .send(Event::Call(Query::KVCas {
+                    key,
+                    from,
+                    to,
+                    responder: tx,
+                }))
+                .await
+                .expect("should be able to send Cas event");
+
+            let response = rx
+                .await
+                .expect("should be able to read from Cas oneshot channel");
+
+            send(
+                event_tx.clone(),
+                None,
+                msg.src,
+                match response {
+                    Ok(()) => Body::CasOk {
+                        msg_id: Some(reserve_msg_id(event_tx).await),
+                        in_reply_to: msg_id,
+                    },
+                    Err(e) => match e.downcast_ref::<ErrorCode>() {
+                        Some(e @ ErrorCode::PreconditionFailed)
+                        | Some(e @ ErrorCode::KeyDoesNotExist) => Body::Error {
+                            in_reply_to: msg_id,
+                            code: e.clone(),
+                            text: "key does not exist".to_string(),
+                        },
+                        _ => panic!("encountered an unexpected error while processing Cas request"),
+                    },
+                },
+            )
+            .await
+        }
         Body::InitOk { .. }
         | Body::ReadOk { .. }
         | Body::WriteOk { .. }
