@@ -59,7 +59,8 @@ pub async fn run() {
         let mut node_id: String = Default::default();
         let mut _ids: Vec<String> = Default::default();
         let mut next_msg_id = 0;
-        let state_machine: KeyValueStore<usize, usize> = Default::default();
+        let mut state_machine: KeyValueStore<StateMachineKey, StateMachineValue> =
+            Default::default();
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -72,7 +73,7 @@ pub async fn run() {
                     .expect("respond to Query::GetNodeId"),
                 Event::Call(Query::SendViaMaelstrom { ref message, .. })
                 | Event::Cast(Command::SendViaMaelstrom { ref message }) => {
-                    let mut message = message.clone();
+                    let message = message.clone();
                     println!(
                         "{}",
                         serde_json::to_string(&message)
@@ -108,13 +109,19 @@ pub async fn run() {
                         .send(state_machine.read(&key).map(|v| v.to_owned()))
                         .expect("should be able to respond to KVRead over oneshot channel");
                 }
-                Event::Cast(Command::KVWrite { key, value }) => {}
+                Event::Cast(Command::KVWrite { key, value }) => {
+                    state_machine.write(key, value);
+                }
                 Event::Call(Query::KVCas {
                     key,
                     from,
                     to,
                     responder,
-                }) => {}
+                }) => {
+                    responder
+                        .send(state_machine.cas(key, from, to))
+                        .expect("should be able to respond to KVCas over oneshot channel");
+                }
             }
         }
     });
