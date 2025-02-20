@@ -18,7 +18,11 @@
   ];
 
   # https://devenv.sh/languages/
-  languages.rust.enable = true;
+  languages.rust = {
+    enable = true;
+    components = [ "rustc" "cargo" "clippy" "rustfmt" "rust-analyzer" ];
+  };
+
 
   # https://devenv.sh/processes/
   # processes.cargo-watch.exec = "cargo-watch";
