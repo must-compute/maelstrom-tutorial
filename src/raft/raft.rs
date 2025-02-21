@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use rand::Rng;
-use tokio::{sync::mpsc::Sender, time::Interval};
+use tokio::{select, time::Interval};
 
 use super::{
     event::{query, Command, Event, Query},
@@ -9,6 +9,7 @@ use super::{
     log::Log,
     message::{Body, ErrorCode, Message},
 };
+use futures::stream::{select_all, FuturesUnordered, StreamExt};
 
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
@@ -48,7 +49,7 @@ pub async fn run() {
     tokio::spawn(async move {
         let mut unacked: HashMap<usize, tokio::sync::oneshot::Sender<Message>> = Default::default();
         let mut node_id: String = Default::default();
-        let mut all_node_ids: Vec<String> = Default::default();
+        let mut other_node_ids: Vec<String> = Default::default();
         let mut next_msg_id = 0;
         let mut state_machine: KeyValueStore<StateMachineKey, StateMachineValue> =
             Default::default();
@@ -60,7 +61,7 @@ pub async fn run() {
             match event {
                 Event::Cast(Command::Init { id, node_ids }) => {
                     node_id = id;
-                    all_node_ids = node_ids;
+                    other_node_ids = node_ids.into_iter().filter(|id| *id != node_id).collect();
                 }
                 Event::Call(Query::GetNodeId { responder }) => responder
                     .send(node_id.clone())
@@ -124,6 +125,11 @@ pub async fn run() {
                     .send(term.clone())
                     .expect("event handler should be abel to send current term"),
                 Event::Cast(Command::AdvanceTermTo { new_term }) => term.advance_to(new_term),
+                Event::Call(Query::GetOtherNodeIds { responder }) => {
+                    responder
+                        .send(other_node_ids.clone())
+                        .expect("should be able to send other node ids back");
+                }
             }
         }
     });
@@ -162,7 +168,7 @@ pub async fn run() {
     }
 }
 
-async fn handle_election_tick(event_tx: Sender<Event>) -> Interval {
+async fn handle_election_tick(event_tx: tokio::sync::mpsc::Sender<Event>) -> Interval {
     let node_state = query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
     match node_state {
         NodeState::Candidate | NodeState::FollowerOf(_) => {
@@ -180,6 +186,24 @@ async fn handle_election_tick(event_tx: Sender<Event>) -> Interval {
                 .await
                 .expect("should be able to send AdvanceTermTo event");
             eprintln!("became a candidate for {new_term}");
+
+            let (tx, rx) = tokio::sync::mpsc::channel::<Message>(1000);
+            broadcast(
+                event_tx.clone(),
+                Body::RequestVote {
+                    msg_id: todo!(),
+                    term: todo!(),
+                    candidate_id: todo!(),
+                    last_log_index: todo!(),
+                    last_log_term: todo!(),
+                },
+                Some(tx),
+            )
+            .await;
+
+            while let Some(f) = rx.recv().await {
+                todo!();
+            }
         }
         NodeState::Leader => {}
     };
@@ -194,7 +218,7 @@ async fn handle_election_tick(event_tx: Sender<Event>) -> Interval {
     new_election_deadline
 }
 
-async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
+async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () {
     match msg.body {
         Body::Init {
             msg_id,
@@ -327,6 +351,21 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
             )
             .await
         }
+        Body::RequestVote {
+            msg_id,
+            term,
+            candidate_id,
+            last_log_index,
+            last_log_term,
+        } => {
+            todo!()
+        }
+        Body::RequestVoteOk { .. } => event_tx
+            .send(Event::Cast(Command::ReceivedViaMaelstrom {
+                response: msg.clone(),
+            }))
+            .await
+            .unwrap(),
         Body::InitOk { .. }
         | Body::ReadOk { .. }
         | Body::WriteOk { .. }
@@ -336,8 +375,44 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
     ()
 }
 
+async fn broadcast(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    body: Body,
+    responder: Option<tokio::sync::mpsc::Sender<Message>>,
+) {
+    let ids = query(event_tx.clone(), |responder| Query::GetOtherNodeIds {
+        responder,
+    })
+    .await;
+    let mut receivers: Vec<tokio::sync::oneshot::Receiver<Message>> = vec![];
+
+    for id in ids {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        receivers.push(rx);
+        send(event_tx.clone(), Some(tx), id, body.clone()).await;
+    }
+
+    let mut futures = receivers.into_iter().collect::<FuturesUnordered<_>>();
+
+    tokio::spawn(async move {
+        while let Some(result) = futures.next().await {
+            match result {
+                Ok(response) => {
+                    if let Some(ref responder) = responder {
+                        responder
+                            .send(response)
+                            .await
+                            .expect("should be able to stream back a response to broadcast caller");
+                    }
+                }
+                Err(_) => panic!(),
+            }
+        }
+    });
+}
+
 pub async fn send(
-    event_tx: Sender<Event>,
+    event_tx: tokio::sync::mpsc::Sender<Event>,
     responder: Option<tokio::sync::oneshot::Sender<Message>>,
     dest: String,
     body: Body,

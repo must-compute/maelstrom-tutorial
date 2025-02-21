@@ -41,6 +41,9 @@ pub enum Query {
         to: StateMachineValue,
         responder: ChannelResponder<anyhow::Result<()>>,
     },
+    GetOtherNodeIds {
+        responder: ChannelResponder<Vec<String>>,
+    },
 }
 
 // for events with no expected response

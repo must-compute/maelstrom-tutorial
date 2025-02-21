@@ -54,6 +54,19 @@ pub enum Body {
         code: ErrorCode,
         text: String,
     },
+    RequestVote {
+        msg_id: usize,
+        term: usize,
+        candidate_id: String,
+        last_log_index: usize,
+        last_log_term: usize,
+    },
+    RequestVoteOk {
+        msg_id: usize,
+        in_reply_to: usize,
+        term: usize,
+        vote_granted: bool,
+    },
 }
 
 impl Body {
@@ -67,7 +80,9 @@ impl Body {
             Body::WriteOk { msg_id, .. } => msg_id.unwrap(),
             Body::Cas { msg_id, .. } => *msg_id,
             Body::CasOk { msg_id, .. } => msg_id.unwrap(),
-            Body::Error { .. } => panic!("error msgs have no msg id"), // this inidicates an issue with the body type. TODO cleaner design
+            Body::Error { .. } => panic!("error msgs have no msg id"),
+            Body::RequestVote { msg_id, .. } => *msg_id,
+            Body::RequestVoteOk { msg_id, .. } => *msg_id, // this inidicates an issue with the body type. TODO cleaner design
         }
     }
     pub fn in_reply_to(&self) -> usize {
