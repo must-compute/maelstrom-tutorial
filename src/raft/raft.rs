@@ -163,14 +163,18 @@ pub async fn run() {
 }
 
 async fn handle_election_tick(event_tx: Sender<Event>) -> Interval {
-    match node_state(event_tx.clone()).await {
+    let node_state = query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
+    match node_state {
         NodeState::Candidate | NodeState::FollowerOf(_) => {
             event_tx
                 .send(Event::Cast(Command::SetNodeState(NodeState::Candidate)))
                 .await
                 .expect("should be able to send BecomeCandidate event");
-            let term = current_term(event_tx.clone()).await;
-            let new_term = term + 1;
+            let term = query(event_tx.clone(), |responder| Query::CurrentTerm {
+                responder,
+            })
+            .await;
+            let new_term = term.get() + 1;
             event_tx
                 .send(Event::Cast(Command::AdvanceTermTo { new_term }))
                 .await
@@ -210,7 +214,9 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
                 None,
                 msg.src,
                 Body::InitOk {
-                    msg_id: Some(reserve_msg_id(event_tx).await),
+                    msg_id: Some(
+                        query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
+                    ),
                     in_reply_to: msg_id,
                 },
             )
@@ -264,7 +270,9 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
                 None,
                 msg.src,
                 Body::WriteOk {
-                    msg_id: Some(reserve_msg_id(event_tx).await),
+                    msg_id: Some(
+                        query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
+                    ),
                     in_reply_to: msg_id,
                 },
             )
@@ -301,7 +309,9 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
                 msg.src,
                 match response {
                     Ok(()) => Body::CasOk {
-                        msg_id: Some(reserve_msg_id(event_tx).await),
+                        msg_id: Some(
+                            query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
+                        ),
                         in_reply_to: msg_id,
                     },
                     Err(e) => match e.downcast_ref::<ErrorCode>() {
@@ -324,36 +334,6 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
         | Body::Error { .. } => panic!(),
     }
     ()
-}
-
-pub async fn reserve_msg_id(event_tx: Sender<Event>) -> usize {
-    let (tx, rx) = tokio::sync::oneshot::channel::<usize>();
-    event_tx
-        .send(Event::Call(Query::ReserveMsgId { responder: tx }))
-        .await
-        .unwrap();
-    rx.await.unwrap()
-}
-
-pub async fn node_state(event_tx: Sender<Event>) -> NodeState {
-    let (tx, rx) = tokio::sync::oneshot::channel::<NodeState>();
-    event_tx
-        .send(Event::Call(Query::NodeState { responder: tx }))
-        .await
-        .unwrap();
-    rx.await
-        .expect("should be able to recv ReserveMsgId response via oneshot responder")
-}
-
-pub async fn current_term(event_tx: Sender<Event>) -> usize {
-    let (tx, rx) = tokio::sync::oneshot::channel::<Term>();
-    event_tx
-        .send(Event::Call(Query::CurrentTerm { responder: tx }))
-        .await
-        .unwrap();
-    rx.await
-        .expect("should be able to recv CurrentTerm response via oneshot responder")
-        .get()
 }
 
 pub async fn send(
