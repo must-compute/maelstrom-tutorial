@@ -1,6 +1,8 @@
+use tokio::sync::mpsc::Sender;
+
 use super::{
     message::Message,
-    raft::{StateMachineKey, StateMachineValue},
+    raft::{NodeState, StateMachineKey, StateMachineValue, Term},
 };
 
 // TODO use Result<T, Error>
@@ -18,6 +20,12 @@ pub enum Query {
     },
     ReserveMsgId {
         responder: ChannelResponder<usize>,
+    },
+    NodeState {
+        responder: ChannelResponder<NodeState>,
+    },
+    CurrentTerm {
+        responder: ChannelResponder<Term>,
     },
     SendViaMaelstrom {
         message: Message,
@@ -51,4 +59,21 @@ pub enum Command {
         key: StateMachineKey,
         value: StateMachineValue,
     },
+    SetNodeState(NodeState),
+    AdvanceTermTo {
+        new_term: usize,
+    },
+}
+
+pub async fn query<R>(
+    event_tx: Sender<Event>,
+    build_query: impl FnOnce(ChannelResponder<R>) -> Query,
+) -> R {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    event_tx
+        .send(Event::Call(build_query(tx)))
+        .await
+        .expect("should be able to send query event");
+    rx.await
+        .expect("should be able to receive query event response")
 }

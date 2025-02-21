@@ -1,51 +1,42 @@
-use std::collections::HashMap;
-use std::hash::Hash;
+use std::{collections::HashMap, time::Duration};
 
-use tokio::sync::mpsc::Sender;
+use rand::Rng;
+use tokio::{sync::mpsc::Sender, time::Interval};
 
 use super::{
-    event::{Command, Event, Query},
+    event::{query, Command, Event, Query},
+    kv_store::KeyValueStore,
+    log::Log,
     message::{Body, ErrorCode, Message},
 };
 
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
 
-#[derive(Default)]
-struct KeyValueStore<K, V>
-where
-    K: Hash + Eq,
-    V: PartialEq,
-{
-    map: HashMap<K, V>,
+type LeaderId = String;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeState {
+    Leader,
+    Candidate,
+    FollowerOf(LeaderId),
 }
 
-impl<K, V> KeyValueStore<K, V>
-where
-    K: Hash + Eq,
-    V: PartialEq,
-{
-    pub fn read(&self, key: &K) -> Option<&V> {
-        self.map.get(key)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Term(usize);
+
+impl Term {
+    pub fn new() -> Self {
+        Term(0)
     }
 
-    pub fn write(&mut self, key: K, value: V) {
-        self.map.insert(key, value);
+    pub fn advance_to(&mut self, new_term: usize) {
+        assert!(new_term > self.0);
+        self.0 = new_term;
     }
 
-    pub fn cas(&mut self, key: K, from: V, to: V) -> anyhow::Result<()> {
-        let res = self.map.get_mut(&key);
-
-        match res {
-            Some(current) => {
-                if *current != from {
-                    return Err(anyhow::Error::new(ErrorCode::PreconditionFailed));
-                }
-                *current = to;
-                Ok(())
-            }
-            None => Err(anyhow::Error::new(ErrorCode::KeyDoesNotExist)),
-        }
+    pub fn get(&self) -> usize {
+        self.0
     }
 }
 
@@ -57,16 +48,19 @@ pub async fn run() {
     tokio::spawn(async move {
         let mut unacked: HashMap<usize, tokio::sync::oneshot::Sender<Message>> = Default::default();
         let mut node_id: String = Default::default();
-        let mut _ids: Vec<String> = Default::default();
+        let mut all_node_ids: Vec<String> = Default::default();
         let mut next_msg_id = 0;
         let mut state_machine: KeyValueStore<StateMachineKey, StateMachineValue> =
             Default::default();
+        let mut node_state = NodeState::FollowerOf("TODO DETERMINE A SANE DEFAULT".to_string());
+        let mut term = Term::new();
+        let mut log = Log::new();
 
         while let Some(event) = event_rx.recv().await {
             match event {
                 Event::Cast(Command::Init { id, node_ids }) => {
                     node_id = id;
-                    _ids = node_ids;
+                    all_node_ids = node_ids;
                 }
                 Event::Call(Query::GetNodeId { responder }) => responder
                     .send(node_id.clone())
@@ -122,6 +116,14 @@ pub async fn run() {
                         .send(state_machine.cas(key, from, to))
                         .expect("should be able to respond to KVCas over oneshot channel");
                 }
+                Event::Call(Query::NodeState { responder }) => responder
+                    .send(node_state.clone())
+                    .expect("event handler should be able to send node_state"),
+                Event::Cast(Command::SetNodeState(new_state)) => node_state = new_state,
+                Event::Call(Query::CurrentTerm { responder }) => responder
+                    .send(term.clone())
+                    .expect("event handler should be abel to send current term"),
+                Event::Cast(Command::AdvanceTermTo { new_term }) => term.advance_to(new_term),
             }
         }
     });
@@ -144,6 +146,9 @@ pub async fn run() {
         }
     });
 
+    let mut rng = rand::rng();
+    let start = tokio::time::Instant::now() + Duration::from_millis(rng.random_range(1000..=3000));
+    let mut election_deadline = tokio::time::interval_at(start, Duration::from_millis(1000));
     loop {
         tokio::select! {
             Some(json_msg) = stdin_rx.recv() => {
@@ -152,9 +157,37 @@ pub async fn run() {
                     async move {handle(event_tx, json_msg).await}
                 });
             }
-            //...
+            _ = election_deadline.tick() => { election_deadline = handle_election_tick(event_tx.clone()).await; }
         }
     }
+}
+
+async fn handle_election_tick(event_tx: Sender<Event>) -> Interval {
+    match node_state(event_tx.clone()).await {
+        NodeState::Candidate | NodeState::FollowerOf(_) => {
+            event_tx
+                .send(Event::Cast(Command::SetNodeState(NodeState::Candidate)))
+                .await
+                .expect("should be able to send BecomeCandidate event");
+            let term = current_term(event_tx.clone()).await;
+            let new_term = term + 1;
+            event_tx
+                .send(Event::Cast(Command::AdvanceTermTo { new_term }))
+                .await
+                .expect("should be able to send AdvanceTermTo event");
+            eprintln!("became a candidate for {new_term}");
+        }
+        NodeState::Leader => {}
+    };
+    let mut rng = rand::rng();
+    let new_duration = Duration::from_millis(rng.random_range(1000..=3000));
+    let new_election_deadline =
+        tokio::time::interval_at(tokio::time::Instant::now() + new_duration, new_duration);
+    eprintln!(
+        "Timer elapsed, next interval: {}ms",
+        new_duration.as_millis()
+    );
+    new_election_deadline
 }
 
 async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
@@ -199,7 +232,9 @@ async fn handle(event_tx: Sender<Event>, msg: Message) -> () {
                 msg.src,
                 match response {
                     Some(value) => Body::ReadOk {
-                        msg_id: Some(reserve_msg_id(event_tx).await),
+                        msg_id: Some(
+                            query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
+                        ),
                         in_reply_to: msg_id,
                         value: serde_json::to_value(&value)
                             .expect("value should be serializable to json"),
@@ -298,6 +333,27 @@ pub async fn reserve_msg_id(event_tx: Sender<Event>) -> usize {
         .await
         .unwrap();
     rx.await.unwrap()
+}
+
+pub async fn node_state(event_tx: Sender<Event>) -> NodeState {
+    let (tx, rx) = tokio::sync::oneshot::channel::<NodeState>();
+    event_tx
+        .send(Event::Call(Query::NodeState { responder: tx }))
+        .await
+        .unwrap();
+    rx.await
+        .expect("should be able to recv ReserveMsgId response via oneshot responder")
+}
+
+pub async fn current_term(event_tx: Sender<Event>) -> usize {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Term>();
+    event_tx
+        .send(Event::Call(Query::CurrentTerm { responder: tx }))
+        .await
+        .unwrap();
+    rx.await
+        .expect("should be able to recv CurrentTerm response via oneshot responder")
+        .get()
 }
 
 pub async fn send(
