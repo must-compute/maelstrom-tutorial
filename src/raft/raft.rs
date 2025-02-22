@@ -392,20 +392,17 @@ async fn broadcast(
         send(event_tx.clone(), Some(tx), id, body.clone()).await;
     }
 
-    let mut futures = receivers.into_iter().collect::<FuturesUnordered<_>>();
+    let mut responses = receivers.into_iter().collect::<FuturesUnordered<_>>();
 
     tokio::spawn(async move {
-        while let Some(result) = futures.next().await {
-            match result {
-                Ok(response) => {
-                    if let Some(ref responder) = responder {
-                        responder
-                            .send(response)
-                            .await
-                            .expect("should be able to stream back a response to broadcast caller");
-                    }
-                }
-                Err(_) => panic!(),
+        while let Some(response_result) = responses.next().await {
+            let response_message =
+                response_result.expect("should be able to recv response during broadcast");
+            if let Some(ref responder) = responder {
+                responder
+                    .send(response_message)
+                    .await
+                    .expect("should be able to return response message from broadcast()");
             }
         }
     });
