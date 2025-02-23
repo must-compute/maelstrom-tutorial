@@ -11,7 +11,6 @@ use super::{
     log::Log,
     message::{Body, ErrorCode, Message},
 };
-use futures::stream::{FuturesUnordered, StreamExt};
 
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
@@ -496,11 +495,14 @@ async fn broadcast(
         responder,
     })
     .await;
-    let mut receivers: Vec<tokio::sync::oneshot::Receiver<Message>> = vec![];
+    let mut receiver_tasks = tokio::task::JoinSet::<Message>::new();
 
     for destination in ids {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        receivers.push(rx);
+        let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
+        receiver_tasks.spawn(async move {
+            rx.await
+                .expect("should be able to recv on one of the broadcast responses")
+        });
         let new_msg_id = query(event_tx.clone(), |responder| Query::ReserveMsgId {
             responder,
         })
@@ -510,11 +512,10 @@ async fn broadcast(
         send(event_tx.clone(), Some(tx), destination, body).await;
     }
 
-    let mut responses = receivers.into_iter().collect::<FuturesUnordered<_>>();
-
+    // TODO should this really be in a separate task?
     tokio::spawn(async move {
-        tracing::debug!("spawned a task at the end of braodcast. Awaiting responses");
-        while let Some(response_result) = responses.next().await {
+        tracing::debug!("spawned a task at the end of broadcast. Awaiting responses");
+        while let Some(response_result) = receiver_tasks.join_next().await {
             let response_message =
                 response_result.expect("should be able to recv response during broadcast");
             tracing::debug!(
