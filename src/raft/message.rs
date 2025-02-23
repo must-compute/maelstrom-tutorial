@@ -85,6 +85,21 @@ impl Body {
             Body::RequestVoteOk { msg_id, .. } => *msg_id, // this inidicates an issue with the body type. TODO cleaner design
         }
     }
+    pub fn set_msg_id(&mut self, new_msg_id: usize) {
+        match self {
+            Body::Init { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            Body::InitOk { ref mut msg_id, .. } => *msg_id = Some(new_msg_id),
+            Body::Read { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            Body::ReadOk { ref mut msg_id, .. } => *msg_id = Some(new_msg_id),
+            Body::Write { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            Body::WriteOk { ref mut msg_id, .. } => *msg_id = Some(new_msg_id),
+            Body::Cas { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            Body::CasOk { ref mut msg_id, .. } => *msg_id = Some(new_msg_id),
+            Body::Error { .. } => panic!("error msgs have no msg id"),
+            Body::RequestVote { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            Body::RequestVoteOk { ref mut msg_id, .. } => *msg_id = new_msg_id, // this inidicates an issue with the body type. TODO cleaner design
+        }
+    }
     pub fn in_reply_to(&self) -> usize {
         match self {
             Body::ReadOk { in_reply_to, .. } => *in_reply_to,

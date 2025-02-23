@@ -1,7 +1,11 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use rand::Rng;
-use tokio::{select, time::Interval};
+use tokio::time::Interval;
+use tracing::instrument::WithSubscriber;
 
 use super::{
     event::{query, Command, Event, Query},
@@ -9,7 +13,7 @@ use super::{
     log::Log,
     message::{Body, ErrorCode, Message},
 };
-use futures::stream::{select_all, FuturesUnordered, StreamExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
@@ -123,12 +127,21 @@ pub async fn run() {
                 Event::Cast(Command::SetNodeState(new_state)) => node_state = new_state,
                 Event::Call(Query::CurrentTerm { responder }) => responder
                     .send(term.clone())
-                    .expect("event handler should be abel to send current term"),
+                    .expect("event handler should be able to send current term"),
                 Event::Cast(Command::AdvanceTermTo { new_term }) => term.advance_to(new_term),
                 Event::Call(Query::GetOtherNodeIds { responder }) => {
                     responder
                         .send(other_node_ids.clone())
-                        .expect("should be able to send other node ids back");
+                        .expect("event handler should be able to send other node ids back");
+                }
+                Event::Call(Query::LastLogIndex { responder }) => responder
+                    .send(log.len())
+                    .expect("event handler should be able to send last log index"),
+                Event::Call(Query::LastLogTerm { responder }) => responder
+                    .send(log.last().term)
+                    .expect("event handler should be able to send last log term"),
+                Event::Cast(Command::BecomeFollowerOf { leader }) => {
+                    node_state = NodeState::FollowerOf(leader)
                 }
             }
         }
@@ -152,6 +165,9 @@ pub async fn run() {
         }
     });
 
+    let (reset_election_deadline_tx, mut reset_election_deadline_rx) =
+        tokio::sync::mpsc::channel::<()>(32);
+
     let mut rng = rand::rng();
     let start = tokio::time::Instant::now() + Duration::from_millis(rng.random_range(1000..=3000));
     let mut election_deadline = tokio::time::interval_at(start, Duration::from_millis(1000));
@@ -163,12 +179,25 @@ pub async fn run() {
                     async move {handle(event_tx, json_msg).await}
                 });
             }
-            _ = election_deadline.tick() => { election_deadline = handle_election_tick(event_tx.clone()).await; }
+            _ = reset_election_deadline_rx.recv() => {
+                    let new_duration = Duration::from_millis(rng.random_range(1000..=3000));
+                    let new_election_deadline =
+                        tokio::time::interval_at(tokio::time::Instant::now() + new_duration, new_duration);
+                    eprintln!(
+                        "Timer elapsed, next interval: {}ms",
+                        new_duration.as_millis()
+                    );
+                    election_deadline = new_election_deadline
+                }
+            _ = election_deadline.tick() =>  handle_election_tick(event_tx.clone(), reset_election_deadline_tx.clone()).await,
         }
     }
 }
 
-async fn handle_election_tick(event_tx: tokio::sync::mpsc::Sender<Event>) -> Interval {
+async fn handle_election_tick(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
+) {
     let node_state = query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
     match node_state {
         NodeState::Candidate | NodeState::FollowerOf(_) => {
@@ -187,35 +216,10 @@ async fn handle_election_tick(event_tx: tokio::sync::mpsc::Sender<Event>) -> Int
                 .expect("should be able to send AdvanceTermTo event");
             eprintln!("became a candidate for {new_term}");
 
-            let (tx, rx) = tokio::sync::mpsc::channel::<Message>(1000);
-            broadcast(
-                event_tx.clone(),
-                Body::RequestVote {
-                    msg_id: todo!(),
-                    term: todo!(),
-                    candidate_id: todo!(),
-                    last_log_index: todo!(),
-                    last_log_term: todo!(),
-                },
-                Some(tx),
-            )
-            .await;
-
-            while let Some(f) = rx.recv().await {
-                todo!();
-            }
+            request_votes(event_tx, reset_election_deadline_tx).await;
         }
         NodeState::Leader => {}
     };
-    let mut rng = rand::rng();
-    let new_duration = Duration::from_millis(rng.random_range(1000..=3000));
-    let new_election_deadline =
-        tokio::time::interval_at(tokio::time::Instant::now() + new_duration, new_duration);
-    eprintln!(
-        "Timer elapsed, next interval: {}ms",
-        new_duration.as_millis()
-    );
-    new_election_deadline
 }
 
 async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () {
@@ -375,10 +379,11 @@ async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () 
     ()
 }
 
+// NOTE: overwrites msg_id because we don't have a nice abstraction for constructing msg bodies yet. TODO fix this.
 async fn broadcast(
     event_tx: tokio::sync::mpsc::Sender<Event>,
-    body: Body,
     responder: Option<tokio::sync::mpsc::Sender<Message>>,
+    body: Body,
 ) {
     let ids = query(event_tx.clone(), |responder| Query::GetOtherNodeIds {
         responder,
@@ -386,10 +391,16 @@ async fn broadcast(
     .await;
     let mut receivers: Vec<tokio::sync::oneshot::Receiver<Message>> = vec![];
 
-    for id in ids {
+    for destination in ids {
         let (tx, rx) = tokio::sync::oneshot::channel();
         receivers.push(rx);
-        send(event_tx.clone(), Some(tx), id, body.clone()).await;
+        let new_msg_id = query(event_tx.clone(), |responder| Query::ReserveMsgId {
+            responder,
+        })
+        .await;
+        let mut body = body.clone();
+        body.set_msg_id(new_msg_id);
+        send(event_tx.clone(), Some(tx), destination, body).await;
     }
 
     let mut responses = receivers.into_iter().collect::<FuturesUnordered<_>>();
@@ -406,6 +417,97 @@ async fn broadcast(
             }
         }
     });
+}
+
+async fn request_votes(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
+) {
+    let should_reset_election_deadline = false;
+    let my_id = query(event_tx.clone(), |responder| Query::GetNodeId { responder }).await;
+    let mut who_voted_for_me: HashSet<String> = Default::default();
+    let my_term_before_the_election = query(event_tx.clone(), |responder| Query::CurrentTerm {
+        responder,
+    })
+    .await
+    .get();
+    let last_log_index = query(event_tx.clone(), |responder| Query::LastLogIndex {
+        responder,
+    })
+    .await;
+    let last_log_term = query(event_tx.clone(), |responder| Query::LastLogTerm {
+        responder,
+    })
+    .await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(32); // TODO set chan size to node count in cluster
+    broadcast(
+        event_tx.clone(),
+        Some(tx),
+        Body::RequestVote {
+            msg_id: 0,
+            term: my_term_before_the_election,
+            candidate_id: my_id,
+            last_log_index,
+            last_log_term,
+        },
+    )
+    .await;
+
+    while let Some(response_message) = rx.recv().await {
+        // maybe step down
+        match response_message.body {
+            Body::RequestVoteOk {
+                in_reply_to,
+                term: voter_term,
+                vote_granted,
+                ..
+            } => {
+                // maybe step down
+                if voter_term > my_term_before_the_election {
+                    eprintln!(
+                        "Stepping down: received term {voter_term} higher than my term {my_term_before_the_election}"
+                    );
+
+                    event_tx
+                        .send(Event::Cast(Command::AdvanceTermTo {
+                            new_term: voter_term,
+                        }))
+                        .await
+                        .expect("should be able to cast AdvanceTermTo event");
+
+                    become_follower(
+                        event_tx.clone(),
+                        reset_election_deadline_tx.clone(),
+                        "TODO LEADER",
+                        voter_term,
+                    )
+                    .await;
+                }
+                // record the vote if valid
+                let state =
+                    query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
+
+                let term = query(event_tx.clone(), |responder| Query::CurrentTerm {
+                    responder,
+                })
+                .await
+                .get();
+
+                if matches!(state, NodeState::Candidate)
+                    && term == my_term_before_the_election
+                    && term == voter_term
+                    && vote_granted
+                {
+                    who_voted_for_me.insert(response_message.src);
+                    eprintln!("who voted for me: {:?}", who_voted_for_me);
+                }
+            }
+            _ => panic!(
+                "response to RequestVote should be RequestVoteOk. Got something else instead"
+            ),
+        };
+    }
 }
 
 pub async fn send(
@@ -433,4 +535,20 @@ pub async fn send(
         Event::Cast(Command::SendViaMaelstrom { message })
     };
     event_tx.send(event).await.unwrap();
+}
+
+async fn become_follower(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
+    leader: &str,
+    term: usize,
+) {
+    // set node state to follower
+    event_tx
+        .send(Event::Cast(Command::BecomeFollowerOf {
+            leader: leader.to_owned(),
+        }))
+        .await;
+    reset_election_deadline_tx.send(()).await;
+    eprintln!("became follower of {leader} in term {term}");
 }

@@ -44,6 +44,12 @@ pub enum Query {
     GetOtherNodeIds {
         responder: ChannelResponder<Vec<String>>,
     },
+    LastLogIndex {
+        responder: ChannelResponder<usize>,
+    },
+    LastLogTerm {
+        responder: ChannelResponder<usize>,
+    },
 }
 
 // for events with no expected response
@@ -65,6 +71,9 @@ pub enum Command {
     SetNodeState(NodeState),
     AdvanceTermTo {
         new_term: usize,
+    },
+    BecomeFollowerOf {
+        leader: String,
     },
 }
 
