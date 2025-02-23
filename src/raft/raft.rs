@@ -25,24 +25,6 @@ pub enum NodeState {
     FollowerOf(LeaderId),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Term(usize);
-
-impl Term {
-    pub fn new() -> Self {
-        Term(0)
-    }
-
-    pub fn advance_to(&mut self, new_term: usize) {
-        assert!(new_term > self.0);
-        self.0 = new_term;
-    }
-
-    pub fn get(&self) -> usize {
-        self.0
-    }
-}
-
 pub async fn run() {
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -56,7 +38,7 @@ pub async fn run() {
         let mut state_machine: KeyValueStore<StateMachineKey, StateMachineValue> =
             Default::default();
         let mut node_state = NodeState::FollowerOf("TODO DETERMINE A SANE DEFAULT".to_string());
-        let mut term = Term::new();
+        let mut term = 0;
         let mut log = Log::new();
 
         while let Some(event) = event_rx.recv().await {
@@ -126,7 +108,10 @@ pub async fn run() {
                 Event::Call(Query::CurrentTerm { responder }) => responder
                     .send(term.clone())
                     .expect("event handler should be able to send current term"),
-                Event::Cast(Command::AdvanceTermTo { new_term }) => term.advance_to(new_term),
+                Event::Cast(Command::AdvanceTermTo { new_term }) => {
+                    assert!(new_term > term);
+                    term = new_term;
+                }
                 Event::Call(Query::GetOtherNodeIds { responder }) => {
                     responder
                         .send(other_node_ids.clone())
@@ -207,7 +192,7 @@ async fn handle_election_tick(
                 responder,
             })
             .await;
-            let new_term = term.get() + 1;
+            let new_term = term + 1;
             event_tx
                 .send(Event::Cast(Command::AdvanceTermTo { new_term }))
                 .await
@@ -420,8 +405,7 @@ async fn request_votes(
     let my_term_before_the_election = query(event_tx.clone(), |responder| Query::CurrentTerm {
         responder,
     })
-    .await
-    .get();
+    .await;
     let last_log_index = query(event_tx.clone(), |responder| Query::LastLogIndex {
         responder,
     })
@@ -480,8 +464,7 @@ async fn request_votes(
                 let term = query(event_tx.clone(), |responder| Query::CurrentTerm {
                     responder,
                 })
-                .await
-                .get();
+                .await;
 
                 if matches!(state, NodeState::Candidate)
                     && term == my_term_before_the_election

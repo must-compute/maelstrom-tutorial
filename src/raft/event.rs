@@ -2,7 +2,7 @@ use tokio::sync::mpsc::Sender;
 
 use super::{
     message::Message,
-    raft::{NodeState, StateMachineKey, StateMachineValue, Term},
+    raft::{NodeState, StateMachineKey, StateMachineValue},
 };
 
 // TODO use Result<T, Error>
@@ -25,7 +25,7 @@ pub enum Query {
         responder: ChannelResponder<NodeState>,
     },
     CurrentTerm {
-        responder: ChannelResponder<Term>,
+        responder: ChannelResponder<usize>,
     },
     SendViaMaelstrom {
         message: Message,
