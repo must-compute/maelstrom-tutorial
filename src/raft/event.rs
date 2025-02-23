@@ -50,6 +50,9 @@ pub enum Query {
     LastLogTerm {
         responder: ChannelResponder<usize>,
     },
+    VotedFor {
+        responder: ChannelResponder<Option<String>>,
+    },
 }
 
 // for events with no expected response
@@ -75,7 +78,7 @@ pub enum Command {
     BecomeFollowerOf {
         leader: String,
     },
-    VotedFor {
+    SetVotedFor {
         candidate: String,
     },
 }

@@ -68,13 +68,22 @@ pub async fn run() {
                             //      will have an old msg id if captured, due to shadowing
                             let msg_id = message.body.msg_id();
                             unacked.insert(msg_id, responder);
+                            tracing::debug!("inserted to unacked with key: {msg_id}");
                         }
                         _ => (),
                     };
                 }
                 Event::Cast(Command::ReceivedViaMaelstrom { response }) => {
+                    tracing::debug!(
+                        "handling Event::Cast(Command::ReceivedViaMaelstrom {:?}",
+                        &response
+                    );
                     // we received an ack, so we notify and remove from unacked.
                     if let Some(notifier) = unacked.remove(&response.body.in_reply_to()) {
+                        tracing::debug!(
+                            "popped unacked in_reply_to: {:?}",
+                            &response.body.in_reply_to()
+                        );
                         notifier
                             .send(response)
                             .expect("returning msg ack should work over the oneshot channel");
@@ -128,9 +137,12 @@ pub async fn run() {
                 Event::Cast(Command::BecomeFollowerOf { leader }) => {
                     node_state = NodeState::FollowerOf(leader)
                 }
-                Event::Cast(Command::VotedFor { candidate }) => {
+                Event::Cast(Command::SetVotedFor { candidate }) => {
                     node_i_voted_for_in_current_term = Some(candidate);
                 }
+                Event::Call(Query::VotedFor { responder }) => responder
+                    .send(node_i_voted_for_in_current_term.clone())
+                    .expect("event handler should be able to send VotedFor"),
             }
         }
     });
@@ -164,7 +176,8 @@ pub async fn run() {
             Some(json_msg) = stdin_rx.recv() => {
                 tokio::spawn({
                     let event_tx = event_tx.clone();
-                    async move {handle(event_tx, json_msg).await}
+                    let reset_election_deadline_tx = reset_election_deadline_tx.clone();
+                    async move {handle(event_tx, reset_election_deadline_tx, json_msg).await}
                 });
             }
             _ = reset_election_deadline_rx.recv() => {
@@ -194,6 +207,9 @@ async fn become_candidate(
                 .send(Event::Cast(Command::SetNodeState(NodeState::Candidate)))
                 .await
                 .expect("should be able to send BecomeCandidate event");
+
+            tracing::debug!("set my state to candidate");
+
             let term = query(event_tx.clone(), |responder| Query::CurrentTerm {
                 responder,
             })
@@ -203,24 +219,33 @@ async fn become_candidate(
                 .send(Event::Cast(Command::AdvanceTermTo { new_term }))
                 .await
                 .expect("should be able to send AdvanceTermTo event");
+            tracing::debug!("advanced my term to {new_term}");
 
             event_tx
-                .send(Event::Cast(Command::VotedFor { candidate: my_id }))
+                .send(Event::Cast(Command::SetVotedFor { candidate: my_id }))
                 .await
                 .expect("should be able to send VotedFor command in become_candidate()");
+            tracing::debug!("set node I voted for to: myself");
 
             reset_election_deadline_tx
                 .send(())
                 .await
                 .expect("should be able to reset election deadline when becoming a candidate");
+            tracing::debug!("sent reset_election_deadline signal");
+            tracing::debug!("I will call request_votes:");
             request_votes(event_tx, reset_election_deadline_tx).await;
-            eprintln!("became a candidate for {new_term}");
+            tracing::debug!("done calling request_votes");
+            tracing::debug!("became a candidate for {new_term}");
         }
         NodeState::Leader => {}
     };
 }
 
-async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () {
+async fn handle(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
+    msg: Message,
+) -> () {
     match msg.body {
         Body::Init {
             msg_id,
@@ -355,20 +380,95 @@ async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () 
         }
         Body::RequestVote {
             msg_id,
-            term,
+            term: candidate_term,
             candidate_id,
-            last_log_index,
-            last_log_term,
+            last_log_index: candidate_last_log_index,
+            last_log_term: candidate_last_log_term,
         } => {
-            // step down if needed
-            //
+            let my_term = query(event_tx.clone(), |responder| Query::CurrentTerm {
+                responder,
+            })
+            .await;
+
+            let i_voted_for =
+                query(event_tx.clone(), |responder| Query::VotedFor { responder }).await;
+
+            step_down_if_needed(
+                event_tx.clone(),
+                reset_election_deadline_tx.clone(),
+                candidate_term,
+                my_term,
+            )
+            .await;
+
+            let mut vote_granted = false;
+            let my_last_log_term = query(event_tx.clone(), |responder| Query::LastLogTerm {
+                responder,
+            })
+            .await;
+            let my_last_log_index = query(event_tx.clone(), |responder| Query::LastLogIndex {
+                responder,
+            })
+            .await;
+
+            if candidate_term < my_term {
+                tracing::debug!("won't grant vote to a candidate whose term ({candidate_term}) is lower than my term ({my_term})");
+            } else if i_voted_for.is_some() {
+                tracing::debug!(
+                    "won't grant vote, since I already voted for {:?}",
+                    i_voted_for.unwrap()
+                );
+            } else if candidate_last_log_term < my_last_log_term {
+                tracing::debug!("won't grant vote to a candidate whose last log term ({candidate_last_log_term}) is older than my last log term ({my_last_log_term})");
+            } else if candidate_last_log_term == my_last_log_term
+                && candidate_last_log_index < my_last_log_index
+            {
+                tracing::debug!("won't grant vote to candidate -- our logs are at the same term ({my_last_log_term}) but their log index ({candidate_last_log_index}) is lower than mine ({my_last_log_index})");
+            } else {
+                tracing::debug!("granting vote to {candidate_id}");
+                vote_granted = true;
+                event_tx
+                    .send(Event::Cast(Command::SetVotedFor {
+                        candidate: candidate_id,
+                    }))
+                    .await
+                    .expect("should be able to send SetVotedFor event");
+                reset_election_deadline_tx.send(()).await.expect(
+                    "should be able to reset election deadline while handling a RequestVote msg",
+                );
+            }
+
+            let new_msg_id = query(event_tx.clone(), |responder| Query::ReserveMsgId {
+                responder,
+            })
+            .await;
+
+            send(
+                event_tx,
+                None,
+                msg.src,
+                Body::RequestVoteOk {
+                    msg_id: new_msg_id,
+                    in_reply_to: msg_id,
+                    term: my_term,
+                    vote_granted,
+                },
+            )
+            .await;
+            tracing::debug!("called send(RequestVoteOk) from handler of RequestVote");
         }
-        Body::RequestVoteOk { .. } => event_tx
-            .send(Event::Cast(Command::ReceivedViaMaelstrom {
-                response: msg.clone(),
-            }))
-            .await
-            .unwrap(),
+        Body::RequestVoteOk { .. } => {
+            tracing::debug!(
+                "RECEIVED Body::RequestVoteOk. Sending Event::Cast(Command::ReceivedViaMaelstrom)"
+            );
+            event_tx
+                .send(Event::Cast(Command::ReceivedViaMaelstrom {
+                    response: msg.clone(),
+                }))
+                .await
+                .unwrap();
+            tracing::debug!("DONE Sending Event::Cast(Command::ReceivedViaMaelstrom)");
+        }
         Body::InitOk { .. }
         | Body::ReadOk { .. }
         | Body::WriteOk { .. }
@@ -405,9 +505,13 @@ async fn broadcast(
     let mut responses = receivers.into_iter().collect::<FuturesUnordered<_>>();
 
     tokio::spawn(async move {
+        tracing::debug!("spawned a task at the end of braodcast. Awaiting responses");
         while let Some(response_result) = responses.next().await {
             let response_message =
                 response_result.expect("should be able to recv response during broadcast");
+            tracing::debug!(
+                "got a response message to broadcast (within the async task). Forwarding it"
+            );
             if let Some(ref responder) = responder {
                 responder
                     .send(response_message)
@@ -423,6 +527,11 @@ async fn request_votes(
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
 ) {
     let my_id = query(event_tx.clone(), |responder| Query::GetNodeId { responder }).await;
+    let other_nodes = query(event_tx.clone(), |responder| Query::GetOtherNodeIds {
+        responder,
+    })
+    .await;
+
     let mut who_voted_for_me: HashSet<String> = Default::default();
     let my_term_before_the_election = query(event_tx.clone(), |responder| Query::CurrentTerm {
         responder,
@@ -437,8 +546,9 @@ async fn request_votes(
     })
     .await;
 
-    // TODO set chan size to node count in cluster
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(32);
+    tracing::debug!("i'm now requesting votes. broadcasting request_vote msg");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(other_nodes.len());
     broadcast(
         event_tx.clone(),
         Some(tx),
@@ -452,7 +562,11 @@ async fn request_votes(
     )
     .await;
 
+    tracing::debug!("i'm done broadcasting request_vote msg. I'll loop over the responses");
+
+    let mut remaining_response_count = other_nodes.len();
     while let Some(response_message) = rx.recv().await {
+        tracing::debug!("remaining_response_count: {remaining_response_count}");
         match response_message.body {
             Body::RequestVoteOk {
                 term: voter_term,
@@ -484,11 +598,22 @@ async fn request_votes(
                     eprintln!("who voted for me: {:?}", who_voted_for_me);
                 }
             }
-            _ => panic!(
-                "response to RequestVote should be RequestVoteOk. Got something else instead"
-            ),
+            _ => {
+                tracing::error!(
+                    "Error: broadcasted RequestVote but received body that isn't RequestVoteOk"
+                );
+                panic!(
+                    "response to RequestVote should be RequestVoteOk. Got something else instead"
+                );
+            }
         };
+        remaining_response_count -= 1;
+        if remaining_response_count == 0 {
+            break;
+        }
     }
+
+    tracing::debug!("I'm done looping over the responses to broadcast of request_votes");
 }
 
 async fn step_down_if_needed(
@@ -559,9 +684,11 @@ async fn become_follower(
         }))
         .await
         .expect("should be able to send BecomeFollower event in become_follower()");
+    tracing::debug!("I set my state to follower of {leader}");
     reset_election_deadline_tx
         .send(())
         .await
         .expect("should be able to reset election deadline when becoming a follower");
+    tracing::debug!("I reset the election deadline because I set state to follower of {leader}");
     eprintln!("became follower of {leader} in term {term}");
 }
