@@ -360,7 +360,8 @@ async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () 
             last_log_index,
             last_log_term,
         } => {
-            todo!()
+            // step down if needed
+            //
         }
         Body::RequestVoteOk { .. } => event_tx
             .send(Event::Cast(Command::ReceivedViaMaelstrom {
@@ -458,27 +459,14 @@ async fn request_votes(
                 vote_granted,
                 ..
             } => {
-                // step down if needed
-                if voter_term > my_term_before_the_election {
-                    eprintln!(
-                        "Stepping down: received term {voter_term} higher than my term {my_term_before_the_election}"
-                    );
+                step_down_if_needed(
+                    event_tx.clone(),
+                    reset_election_deadline_tx.clone(),
+                    voter_term,
+                    my_term_before_the_election,
+                )
+                .await;
 
-                    event_tx
-                        .send(Event::Cast(Command::AdvanceTermTo {
-                            new_term: voter_term,
-                        }))
-                        .await
-                        .expect("should be able to cast AdvanceTermTo event");
-
-                    become_follower(
-                        event_tx.clone(),
-                        reset_election_deadline_tx.clone(),
-                        "TODO LEADER",
-                        voter_term,
-                    )
-                    .await;
-                }
                 // record the vote if valid
                 let state =
                     query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
@@ -500,6 +488,34 @@ async fn request_votes(
                 "response to RequestVote should be RequestVoteOk. Got something else instead"
             ),
         };
+    }
+}
+
+async fn step_down_if_needed(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
+    voter_term: usize,
+    my_term_before_the_election: usize,
+) {
+    if voter_term > my_term_before_the_election {
+        eprintln!(
+            "Stepping down: received term {voter_term} higher than my term {my_term_before_the_election}"
+        );
+
+        event_tx
+            .send(Event::Cast(Command::AdvanceTermTo {
+                new_term: voter_term,
+            }))
+            .await
+            .expect("should be able to cast AdvanceTermTo event");
+
+        become_follower(
+            event_tx.clone(),
+            reset_election_deadline_tx.clone(),
+            "TODO LEADER",
+            voter_term,
+        )
+        .await;
     }
 }
 
