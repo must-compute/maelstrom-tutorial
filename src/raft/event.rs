@@ -75,6 +75,9 @@ pub enum Command {
     BecomeFollowerOf {
         leader: String,
     },
+    VotedFor {
+        candidate: String,
+    },
 }
 
 pub async fn query<R>(

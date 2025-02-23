@@ -40,6 +40,7 @@ pub async fn run() {
         let mut node_state = NodeState::FollowerOf("TODO DETERMINE A SANE DEFAULT".to_string());
         let mut term = 0;
         let mut log = Log::new();
+        let mut node_i_voted_for_in_current_term: Option<String> = None;
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -111,6 +112,7 @@ pub async fn run() {
                 Event::Cast(Command::AdvanceTermTo { new_term }) => {
                     assert!(new_term > term);
                     term = new_term;
+                    node_i_voted_for_in_current_term = None;
                 }
                 Event::Call(Query::GetOtherNodeIds { responder }) => {
                     responder
@@ -125,6 +127,9 @@ pub async fn run() {
                     .expect("event handler should be able to send last log term"),
                 Event::Cast(Command::BecomeFollowerOf { leader }) => {
                     node_state = NodeState::FollowerOf(leader)
+                }
+                Event::Cast(Command::VotedFor { candidate }) => {
+                    node_i_voted_for_in_current_term = Some(candidate);
                 }
             }
         }
@@ -172,16 +177,17 @@ pub async fn run() {
                     );
                     election_deadline = new_election_deadline
                 }
-            _ = election_deadline.tick() =>  handle_election_tick(event_tx.clone(), reset_election_deadline_tx.clone()).await,
+            _ = election_deadline.tick() =>  become_candidate(event_tx.clone(), reset_election_deadline_tx.clone()).await,
         }
     }
 }
 
-async fn handle_election_tick(
+async fn become_candidate(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
 ) {
     let node_state = query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
+    let my_id = query(event_tx.clone(), |responder| Query::GetNodeId { responder }).await;
     match node_state {
         NodeState::Candidate | NodeState::FollowerOf(_) => {
             event_tx
@@ -197,9 +203,18 @@ async fn handle_election_tick(
                 .send(Event::Cast(Command::AdvanceTermTo { new_term }))
                 .await
                 .expect("should be able to send AdvanceTermTo event");
-            eprintln!("became a candidate for {new_term}");
 
+            event_tx
+                .send(Event::Cast(Command::VotedFor { candidate: my_id }))
+                .await
+                .expect("should be able to send VotedFor command in become_candidate()");
+
+            reset_election_deadline_tx
+                .send(())
+                .await
+                .expect("should be able to reset election deadline when becoming a candidate");
             request_votes(event_tx, reset_election_deadline_tx).await;
+            eprintln!("became a candidate for {new_term}");
         }
         NodeState::Leader => {}
     };
@@ -338,7 +353,13 @@ async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () 
             )
             .await
         }
-        Body::RequestVote { .. } => {
+        Body::RequestVote {
+            msg_id,
+            term,
+            candidate_id,
+            last_log_index,
+            last_log_term,
+        } => {
             todo!()
         }
         Body::RequestVoteOk { .. } => event_tx
