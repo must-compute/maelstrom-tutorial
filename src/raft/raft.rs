@@ -4,8 +4,6 @@ use std::{
 };
 
 use rand::Rng;
-use tokio::time::Interval;
-use tracing::instrument::WithSubscriber;
 
 use super::{
     event::{query, Command, Event, Query},
@@ -355,13 +353,7 @@ async fn handle(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) -> () 
             )
             .await
         }
-        Body::RequestVote {
-            msg_id,
-            term,
-            candidate_id,
-            last_log_index,
-            last_log_term,
-        } => {
+        Body::RequestVote { .. } => {
             todo!()
         }
         Body::RequestVoteOk { .. } => event_tx
@@ -423,7 +415,6 @@ async fn request_votes(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    let should_reset_election_deadline = false;
     let my_id = query(event_tx.clone(), |responder| Query::GetNodeId { responder }).await;
     let mut who_voted_for_me: HashSet<String> = Default::default();
     let my_term_before_the_election = query(event_tx.clone(), |responder| Query::CurrentTerm {
@@ -458,7 +449,6 @@ async fn request_votes(
         // maybe step down
         match response_message.body {
             Body::RequestVoteOk {
-                in_reply_to,
                 term: voter_term,
                 vote_granted,
                 ..
@@ -548,7 +538,11 @@ async fn become_follower(
         .send(Event::Cast(Command::BecomeFollowerOf {
             leader: leader.to_owned(),
         }))
-        .await;
-    reset_election_deadline_tx.send(()).await;
+        .await
+        .expect("should be able to send BecomeFollower event in become_follower()");
+    reset_election_deadline_tx
+        .send(())
+        .await
+        .expect("should be able to reset election deadline when becoming a follower");
     eprintln!("became follower of {leader} in term {term}");
 }
