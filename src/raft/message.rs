@@ -106,7 +106,13 @@ impl Body {
             Body::WriteOk { in_reply_to, .. } => *in_reply_to,
             Body::CasOk { in_reply_to, .. } => *in_reply_to,
             Body::Error { in_reply_to, .. } => *in_reply_to,
-            _ => panic!("shouldn't be used"),
+            Body::RequestVoteOk { in_reply_to, .. } => *in_reply_to,
+            Body::Init { .. }
+            | Body::InitOk { .. }
+            | Body::Read { .. }
+            | Body::Write { .. }
+            | Body::Cas { .. }
+            | Body::RequestVote { .. } => panic!("in_reply_to not supported for {:?}", self),
         }
     }
 }
