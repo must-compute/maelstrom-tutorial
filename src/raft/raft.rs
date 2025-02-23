@@ -431,7 +431,8 @@ async fn request_votes(
     })
     .await;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(32); // TODO set chan size to node count in cluster
+    // TODO set chan size to node count in cluster
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(32);
     broadcast(
         event_tx.clone(),
         Some(tx),
@@ -446,14 +447,13 @@ async fn request_votes(
     .await;
 
     while let Some(response_message) = rx.recv().await {
-        // maybe step down
         match response_message.body {
             Body::RequestVoteOk {
                 term: voter_term,
                 vote_granted,
                 ..
             } => {
-                // maybe step down
+                // step down if needed
                 if voter_term > my_term_before_the_election {
                     eprintln!(
                         "Stepping down: received term {voter_term} higher than my term {my_term_before_the_election}"
@@ -477,7 +477,6 @@ async fn request_votes(
                 // record the vote if valid
                 let state =
                     query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
-
                 let term = query(event_tx.clone(), |responder| Query::CurrentTerm {
                     responder,
                 })
