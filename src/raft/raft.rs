@@ -190,7 +190,15 @@ pub async fn run() {
                     );
                     election_deadline = new_election_deadline
                 }
-            _ = election_deadline.tick() =>  become_candidate(event_tx.clone(), reset_election_deadline_tx.clone()).await,
+            _ = election_deadline.tick() =>  {
+                tokio::spawn({
+                    let event_tx = event_tx.clone();
+                    let reset_election_deadline_tx = reset_election_deadline_tx.clone();
+                    async move {
+                        become_candidate(event_tx, reset_election_deadline_tx).await
+                    }
+                });
+            }
         }
     }
 }
