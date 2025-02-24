@@ -408,6 +408,13 @@ async fn handle(
             )
             .await;
 
+            // in case my term was advanced by step_down_if_needed
+            // TODO find a better design!!
+            let my_term = query(event_tx.clone(), |responder| Query::CurrentTerm {
+                responder,
+            })
+            .await;
+
             let mut vote_granted = false;
             let my_last_log_term = query(event_tx.clone(), |responder| Query::LastLogTerm {
                 responder,
@@ -604,7 +611,7 @@ async fn request_votes(
                     && vote_granted
                 {
                     who_voted_for_me.insert(response_message.src);
-                    eprintln!("who voted for me: {:?}", who_voted_for_me);
+                    tracing::debug!("who voted for me: {:?}", who_voted_for_me);
                 }
             }
             _ => {
