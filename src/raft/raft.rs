@@ -6,32 +6,15 @@ use std::{
 
 use rand::Rng;
 
+use crate::raft::event::update_raft_with;
+
 use super::{
     event::{query, Command, Event, Query},
     kv_store::KeyValueStore,
     log::Log,
     message::{Body, ErrorCode, Message},
+    raft_node::RaftNode,
 };
-
-#[derive(Debug, Clone)]
-pub struct Raft {
-    pub current_term: usize,
-    pub log: Log,
-    pub my_id: String,
-    pub node_state: NodeState,
-    pub other_node_ids: Vec<String>,
-    pub voted_for: Option<String>,
-}
-
-impl Raft {
-    pub fn become_follower_of(raft: &mut Raft, leader: &str) {
-        raft.node_state = NodeState::FollowerOf(leader.to_string());
-    }
-
-    pub fn set_voted_for(raft: &mut Raft, candidate: &str) {
-        raft.voted_for = Some(candidate.to_string());
-    }
-}
 
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
@@ -51,7 +34,7 @@ pub async fn run() {
 
     // event handler task
     tokio::spawn(async move {
-        let mut raft = Raft {
+        let mut raft = RaftNode {
             current_term: 0,
             log: Log::new(),
             my_id: Default::default(),
@@ -139,19 +122,7 @@ pub async fn run() {
                         .send(state_machine.cas(key, from, to))
                         .expect("should be able to respond to KVCas over oneshot channel");
                 }
-                Event::Cast(Command::SetNodeState(new_state)) => raft.node_state = new_state,
-                Event::Cast(Command::AdvanceTermTo { new_term }) => {
-                    assert!(new_term > raft.current_term);
-                    raft.current_term = new_term;
-                    raft.voted_for = None;
-                }
-                // Event::Cast(Command::BecomeFollowerOf { leader }) => {
-                //     raft.node_state = NodeState::FollowerOf(leader)
-                // }
-                // Event::Cast(Command::SetVotedFor { candidate }) => {
-                //     raft.voted_for = Some(candidate);
-                // }
-                Event::Cast(Command::UpdateRaftWith { updater }) => updater(&mut raft),
+                Event::Cast(Command::SetRaftSnapshot(new_snapshot)) => raft = new_snapshot,
             }
         }
     });
@@ -216,7 +187,7 @@ async fn become_candidate(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    let Raft {
+    let RaftNode {
         node_state,
         my_id,
         current_term,
@@ -228,24 +199,22 @@ async fn become_candidate(
 
     match node_state {
         NodeState::Candidate | NodeState::FollowerOf(_) => {
-            event_tx
-                .send(Event::Cast(Command::SetNodeState(NodeState::Candidate)))
-                .await
-                .expect("should be able to send BecomeCandidate event");
+            update_raft_with(event_tx.clone(), |raft| {
+                raft.node_state = NodeState::Candidate;
+            })
+            .await;
 
             tracing::debug!("set my state to candidate");
 
             let new_term = current_term + 1;
-            event_tx
-                .send(Event::Cast(Command::AdvanceTermTo { new_term }))
-                .await
-                .expect("should be able to send AdvanceTermTo event");
+
+            update_raft_with(event_tx.clone(), |raft| {
+                raft.advance_term_to(new_term);
+            })
+            .await;
+
             tracing::debug!("advanced my term to {new_term}");
 
-            // event_tx
-            //     .send(Event::Cast(Command::SetVotedFor { candidate: my_id }))
-            //     .await
-            //     .expect("should be able to send VotedFor command in become_candidate()");
             tracing::debug!("set node I voted for to: myself");
 
             reset_election_deadline_tx
@@ -406,7 +375,7 @@ async fn handle(
             last_log_index: candidate_last_log_index,
             last_log_term: candidate_last_log_term,
         } => {
-            let Raft {
+            let RaftNode {
                 current_term,
                 voted_for,
                 log,
@@ -426,7 +395,7 @@ async fn handle(
 
             // in case my term was advanced by step_down_if_needed
             // TODO find a better design!!
-            let Raft { current_term, .. } = query(event_tx.clone(), |responder| {
+            let raft @ RaftNode { current_term, .. } = query(event_tx.clone(), |responder| {
                 Query::RaftSnapshot { responder }
             })
             .await;
@@ -449,12 +418,12 @@ async fn handle(
             } else {
                 tracing::debug!("granting vote to {candidate_id}");
                 vote_granted = true;
-                event_tx
-                    .send(Event::Cast(Command::SetVotedFor {
-                        candidate: candidate_id,
-                    }))
-                    .await
-                    .expect("should be able to send SetVotedFor event");
+
+                update_raft_with(event_tx.clone(), |raft| {
+                    raft.set_voted_for(&candidate_id);
+                })
+                .await;
+
                 reset_election_deadline_tx.send(()).await.expect(
                     "should be able to reset election deadline while handling a RequestVote msg",
                 );
@@ -506,8 +475,8 @@ async fn broadcast(
     responder: Option<tokio::sync::mpsc::Sender<Message>>,
     body: Body,
 ) {
-    let Raft { other_node_ids, .. } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
-        responder,
+    let RaftNode { other_node_ids, .. } = query(event_tx.clone(), |responder| {
+        Query::RaftSnapshot { responder }
     })
     .await;
     let mut receiver_tasks = tokio::task::JoinSet::<Message>::new();
@@ -550,7 +519,7 @@ async fn request_votes(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    let Raft {
+    let RaftNode {
         my_id,
         other_node_ids,
         log,
@@ -599,18 +568,14 @@ async fn request_votes(
                 .await;
 
                 // record the vote if valid
-                let Raft {
-                    node_state,
-                    current_term,
-                    ..
-                } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+                let raft = query(event_tx.clone(), |responder| Query::RaftSnapshot {
                     responder,
                 })
                 .await;
 
-                if matches!(node_state, NodeState::Candidate)
-                    && current_term == my_term_before_the_election
-                    && current_term == voter_term
+                if matches!(raft.node_state, NodeState::Candidate)
+                    && raft.current_term == my_term_before_the_election
+                    && raft.current_term == voter_term
                     && vote_granted
                 {
                     who_voted_for_me.insert(response_message.src);
@@ -646,12 +611,10 @@ async fn step_down_if_needed(
             "Stepping down: received term {voter_term} higher than my term {my_term_before_the_election}"
         );
 
-        event_tx
-            .send(Event::Cast(Command::AdvanceTermTo {
-                new_term: voter_term,
-            }))
-            .await
-            .expect("should be able to cast AdvanceTermTo event");
+        update_raft_with(event_tx.clone(), |raft| {
+            raft.advance_term_to(voter_term);
+        })
+        .await;
 
         become_follower(
             event_tx.clone(),
@@ -669,7 +632,7 @@ pub async fn send(
     dest: String,
     body: Body,
 ) {
-    let Raft { my_id, .. } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+    let RaftNode { my_id, .. } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
         responder,
     })
     .await;
@@ -695,12 +658,11 @@ async fn become_follower(
     term: usize,
 ) {
     // set node state to follower
-    event_tx
-        .send(Event::Cast(Command::BecomeFollowerOf {
-            leader: leader.to_owned(),
-        }))
-        .await
-        .expect("should be able to send BecomeFollower event in become_follower()");
+    update_raft_with(event_tx, |raft| {
+        raft.become_follower_of(leader);
+    })
+    .await;
+
     tracing::debug!("I set my state to follower of {leader}");
     reset_election_deadline_tx
         .send(())

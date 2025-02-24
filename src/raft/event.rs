@@ -3,7 +3,8 @@ use tokio::sync::mpsc::Sender;
 use super::{
     log::Log,
     message::Message,
-    raft::{NodeState, Raft, StateMachineKey, StateMachineValue},
+    raft::{NodeState, StateMachineKey, StateMachineValue},
+    raft_node::RaftNode,
 };
 
 // TODO use Result<T, Error>
@@ -20,7 +21,7 @@ pub enum Query {
         responder: ChannelResponder<usize>,
     },
     RaftSnapshot {
-        responder: ChannelResponder<Raft>,
+        responder: ChannelResponder<RaftNode>,
     },
     SendViaMaelstrom {
         message: Message,
@@ -54,19 +55,7 @@ pub enum Command {
         key: StateMachineKey,
         value: StateMachineValue,
     },
-    SetNodeState(NodeState),
-    AdvanceTermTo {
-        new_term: usize,
-    },
-    // BecomeFollowerOf {
-    //     leader: String,
-    // },
-    // SetVotedFor {
-    //     candidate: String,
-    // },
-    UpdateRaftWith {
-        updater: fn(&mut Raft) -> (),
-    },
+    SetRaftSnapshot(RaftNode),
 }
 
 pub async fn query<R>(
@@ -80,4 +69,16 @@ pub async fn query<R>(
         .expect("should be able to send query event");
     rx.await
         .expect("should be able to receive query event response")
+}
+
+pub async fn update_raft_with(event_tx: Sender<Event>, updater: impl Fn(&mut RaftNode)) {
+    let mut raft = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+        responder,
+    })
+    .await;
+    updater(&mut raft);
+    event_tx
+        .send(Event::Cast(Command::SetRaftSnapshot(raft)))
+        .await
+        .expect("should be able to send SetRaftSnapshot event over event_tx");
 }
