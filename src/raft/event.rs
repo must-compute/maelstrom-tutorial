@@ -3,7 +3,7 @@ use tokio::sync::mpsc::Sender;
 use super::{
     log::Log,
     message::Message,
-    raft::{NodeState, StateMachineKey, StateMachineValue},
+    raft::{NodeState, Raft, StateMachineKey, StateMachineValue},
 };
 
 // TODO use Result<T, Error>
@@ -12,16 +12,6 @@ type ChannelResponder<T> = tokio::sync::oneshot::Sender<T>;
 pub enum Event {
     Call(Query),
     Cast(Command),
-}
-
-#[derive(Debug, Clone)]
-pub struct Raft {
-    pub current_term: usize,
-    pub log: Log,
-    pub my_id: String,
-    pub node_state: NodeState,
-    pub other_node_ids: Vec<String>,
-    pub voted_for: Option<String>,
 }
 
 // For events with a notifier channel for response
@@ -68,11 +58,14 @@ pub enum Command {
     AdvanceTermTo {
         new_term: usize,
     },
-    BecomeFollowerOf {
-        leader: String,
-    },
-    SetVotedFor {
-        candidate: String,
+    // BecomeFollowerOf {
+    //     leader: String,
+    // },
+    // SetVotedFor {
+    //     candidate: String,
+    // },
+    UpdateRaftWith {
+        updater: fn(&mut Raft) -> (),
     },
 }
 

@@ -1,16 +1,37 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
 
 use rand::Rng;
 
 use super::{
-    event::{query, Command, Event, Query, Raft},
+    event::{query, Command, Event, Query},
     kv_store::KeyValueStore,
     log::Log,
     message::{Body, ErrorCode, Message},
 };
+
+#[derive(Debug, Clone)]
+pub struct Raft {
+    pub current_term: usize,
+    pub log: Log,
+    pub my_id: String,
+    pub node_state: NodeState,
+    pub other_node_ids: Vec<String>,
+    pub voted_for: Option<String>,
+}
+
+impl Raft {
+    pub fn become_follower_of(raft: &mut Raft, leader: &str) {
+        raft.node_state = NodeState::FollowerOf(leader.to_string());
+    }
+
+    pub fn set_voted_for(raft: &mut Raft, candidate: &str) {
+        raft.voted_for = Some(candidate.to_string());
+    }
+}
 
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
@@ -124,12 +145,13 @@ pub async fn run() {
                     raft.current_term = new_term;
                     raft.voted_for = None;
                 }
-                Event::Cast(Command::BecomeFollowerOf { leader }) => {
-                    raft.node_state = NodeState::FollowerOf(leader)
-                }
-                Event::Cast(Command::SetVotedFor { candidate }) => {
-                    raft.voted_for = Some(candidate);
-                }
+                // Event::Cast(Command::BecomeFollowerOf { leader }) => {
+                //     raft.node_state = NodeState::FollowerOf(leader)
+                // }
+                // Event::Cast(Command::SetVotedFor { candidate }) => {
+                //     raft.voted_for = Some(candidate);
+                // }
+                Event::Cast(Command::UpdateRaftWith { updater }) => updater(&mut raft),
             }
         }
     });
@@ -220,10 +242,10 @@ async fn become_candidate(
                 .expect("should be able to send AdvanceTermTo event");
             tracing::debug!("advanced my term to {new_term}");
 
-            event_tx
-                .send(Event::Cast(Command::SetVotedFor { candidate: my_id }))
-                .await
-                .expect("should be able to send VotedFor command in become_candidate()");
+            // event_tx
+            //     .send(Event::Cast(Command::SetVotedFor { candidate: my_id }))
+            //     .await
+            //     .expect("should be able to send VotedFor command in become_candidate()");
             tracing::debug!("set node I voted for to: myself");
 
             reset_election_deadline_tx
