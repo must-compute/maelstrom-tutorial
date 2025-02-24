@@ -24,13 +24,14 @@ impl Log {
         self.entries.append(entries);
     }
 
-    pub fn last(&self) -> &Entry {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn last_term(&self) -> usize {
         self.entries
             .last()
             .expect("append-only Log should never be empty")
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
+            .term
     }
 }

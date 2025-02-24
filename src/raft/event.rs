@@ -1,6 +1,7 @@
 use tokio::sync::mpsc::Sender;
 
 use super::{
+    log::Log,
     message::Message,
     raft::{NodeState, StateMachineKey, StateMachineValue},
 };
@@ -13,19 +14,23 @@ pub enum Event {
     Cast(Command),
 }
 
+#[derive(Debug, Clone)]
+pub struct Raft {
+    pub current_term: usize,
+    pub log: Log,
+    pub my_id: String,
+    pub node_state: NodeState,
+    pub other_node_ids: Vec<String>,
+    pub voted_for: Option<String>,
+}
+
 // For events with a notifier channel for response
 pub enum Query {
-    GetNodeId {
-        responder: ChannelResponder<String>,
-    },
     ReserveMsgId {
         responder: ChannelResponder<usize>,
     },
-    NodeState {
-        responder: ChannelResponder<NodeState>,
-    },
-    CurrentTerm {
-        responder: ChannelResponder<usize>,
+    RaftSnapshot {
+        responder: ChannelResponder<Raft>,
     },
     SendViaMaelstrom {
         message: Message,
@@ -40,18 +45,6 @@ pub enum Query {
         from: StateMachineValue,
         to: StateMachineValue,
         responder: ChannelResponder<anyhow::Result<()>>,
-    },
-    GetOtherNodeIds {
-        responder: ChannelResponder<Vec<String>>,
-    },
-    LastLogIndex {
-        responder: ChannelResponder<usize>,
-    },
-    LastLogTerm {
-        responder: ChannelResponder<usize>,
-    },
-    VotedFor {
-        responder: ChannelResponder<Option<String>>,
     },
 }
 

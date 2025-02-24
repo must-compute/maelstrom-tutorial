@@ -6,7 +6,7 @@ use std::{
 use rand::Rng;
 
 use super::{
-    event::{query, Command, Event, Query},
+    event::{query, Command, Event, Query, Raft},
     kv_store::KeyValueStore,
     log::Log,
     message::{Body, ErrorCode, Message},
@@ -30,26 +30,34 @@ pub async fn run() {
 
     // event handler task
     tokio::spawn(async move {
+        let mut raft = Raft {
+            current_term: 0,
+            log: Log::new(),
+            my_id: Default::default(),
+            node_state: NodeState::FollowerOf("TODO DETERMINE A SANE DEFAULT".to_string()),
+            other_node_ids: Default::default(),
+            voted_for: None,
+        };
+
         let mut unacked: HashMap<usize, tokio::sync::oneshot::Sender<Message>> = Default::default();
-        let mut node_id: String = Default::default();
-        let mut other_node_ids: Vec<String> = Default::default();
         let mut next_msg_id = 0;
         let mut state_machine: KeyValueStore<StateMachineKey, StateMachineValue> =
             Default::default();
-        let mut node_state = NodeState::FollowerOf("TODO DETERMINE A SANE DEFAULT".to_string());
-        let mut term = 0;
-        let mut log = Log::new();
-        let mut node_i_voted_for_in_current_term: Option<String> = None;
 
         while let Some(event) = event_rx.recv().await {
             match event {
-                Event::Cast(Command::Init { id, node_ids }) => {
-                    node_id = id;
-                    other_node_ids = node_ids.into_iter().filter(|id| *id != node_id).collect();
+                Event::Call(Query::RaftSnapshot { responder }) => {
+                    responder
+                        .send(raft.clone())
+                        .expect("should be able to send node state");
                 }
-                Event::Call(Query::GetNodeId { responder }) => responder
-                    .send(node_id.clone())
-                    .expect("respond to Query::GetNodeId"),
+                Event::Cast(Command::Init { id, node_ids }) => {
+                    raft.my_id = id;
+                    raft.other_node_ids = node_ids
+                        .into_iter()
+                        .filter(|id| *id != raft.my_id)
+                        .collect();
+                }
                 Event::Call(Query::SendViaMaelstrom { ref message, .. })
                 | Event::Cast(Command::SendViaMaelstrom { ref message }) => {
                     let message = message.clone();
@@ -110,38 +118,18 @@ pub async fn run() {
                         .send(state_machine.cas(key, from, to))
                         .expect("should be able to respond to KVCas over oneshot channel");
                 }
-                Event::Call(Query::NodeState { responder }) => responder
-                    .send(node_state.clone())
-                    .expect("event handler should be able to send node_state"),
-                Event::Cast(Command::SetNodeState(new_state)) => node_state = new_state,
-                Event::Call(Query::CurrentTerm { responder }) => responder
-                    .send(term.clone())
-                    .expect("event handler should be able to send current term"),
+                Event::Cast(Command::SetNodeState(new_state)) => raft.node_state = new_state,
                 Event::Cast(Command::AdvanceTermTo { new_term }) => {
-                    assert!(new_term > term);
-                    term = new_term;
-                    node_i_voted_for_in_current_term = None;
+                    assert!(new_term > raft.current_term);
+                    raft.current_term = new_term;
+                    raft.voted_for = None;
                 }
-                Event::Call(Query::GetOtherNodeIds { responder }) => {
-                    responder
-                        .send(other_node_ids.clone())
-                        .expect("event handler should be able to send other node ids back");
-                }
-                Event::Call(Query::LastLogIndex { responder }) => responder
-                    .send(log.len())
-                    .expect("event handler should be able to send last log index"),
-                Event::Call(Query::LastLogTerm { responder }) => responder
-                    .send(log.last().term)
-                    .expect("event handler should be able to send last log term"),
                 Event::Cast(Command::BecomeFollowerOf { leader }) => {
-                    node_state = NodeState::FollowerOf(leader)
+                    raft.node_state = NodeState::FollowerOf(leader)
                 }
                 Event::Cast(Command::SetVotedFor { candidate }) => {
-                    node_i_voted_for_in_current_term = Some(candidate);
+                    raft.voted_for = Some(candidate);
                 }
-                Event::Call(Query::VotedFor { responder }) => responder
-                    .send(node_i_voted_for_in_current_term.clone())
-                    .expect("event handler should be able to send VotedFor"),
             }
         }
     });
@@ -206,8 +194,16 @@ async fn become_candidate(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    let node_state = query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
-    let my_id = query(event_tx.clone(), |responder| Query::GetNodeId { responder }).await;
+    let Raft {
+        node_state,
+        my_id,
+        current_term,
+        ..
+    } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+        responder,
+    })
+    .await;
+
     match node_state {
         NodeState::Candidate | NodeState::FollowerOf(_) => {
             event_tx
@@ -217,11 +213,7 @@ async fn become_candidate(
 
             tracing::debug!("set my state to candidate");
 
-            let term = query(event_tx.clone(), |responder| Query::CurrentTerm {
-                responder,
-            })
-            .await;
-            let new_term = term + 1;
+            let new_term = current_term + 1;
             event_tx
                 .send(Event::Cast(Command::AdvanceTermTo { new_term }))
                 .await
@@ -392,52 +384,46 @@ async fn handle(
             last_log_index: candidate_last_log_index,
             last_log_term: candidate_last_log_term,
         } => {
-            let my_term = query(event_tx.clone(), |responder| Query::CurrentTerm {
+            let Raft {
+                current_term,
+                voted_for,
+                log,
+                ..
+            } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
                 responder,
             })
             .await;
-
-            let i_voted_for =
-                query(event_tx.clone(), |responder| Query::VotedFor { responder }).await;
 
             step_down_if_needed(
                 event_tx.clone(),
                 reset_election_deadline_tx.clone(),
                 candidate_term,
-                my_term,
+                current_term,
             )
             .await;
 
             // in case my term was advanced by step_down_if_needed
             // TODO find a better design!!
-            let my_term = query(event_tx.clone(), |responder| Query::CurrentTerm {
-                responder,
+            let Raft { current_term, .. } = query(event_tx.clone(), |responder| {
+                Query::RaftSnapshot { responder }
             })
             .await;
 
             let mut vote_granted = false;
-            let my_last_log_term = query(event_tx.clone(), |responder| Query::LastLogTerm {
-                responder,
-            })
-            .await;
-            let my_last_log_index = query(event_tx.clone(), |responder| Query::LastLogIndex {
-                responder,
-            })
-            .await;
 
-            if candidate_term < my_term {
-                tracing::debug!("won't grant vote to a candidate whose term ({candidate_term}) is lower than my term ({my_term})");
-            } else if i_voted_for.is_some() {
+            if candidate_term < current_term {
+                tracing::debug!("won't grant vote to a candidate whose term ({candidate_term}) is lower than my term ({current_term})");
+            } else if voted_for.is_some() {
                 tracing::debug!(
                     "won't grant vote, since I already voted for {:?}",
-                    i_voted_for.unwrap()
+                    voted_for.unwrap()
                 );
-            } else if candidate_last_log_term < my_last_log_term {
-                tracing::debug!("won't grant vote to a candidate whose last log term ({candidate_last_log_term}) is older than my last log term ({my_last_log_term})");
-            } else if candidate_last_log_term == my_last_log_term
-                && candidate_last_log_index < my_last_log_index
+            } else if candidate_last_log_term < log.last_term() {
+                tracing::debug!("won't grant vote to a candidate whose last log term ({candidate_last_log_term}) is older than my last log term ({})", log.last_term());
+            } else if candidate_last_log_term == log.last_term()
+                && candidate_last_log_index < log.len()
             {
-                tracing::debug!("won't grant vote to candidate -- our logs are at the same term ({my_last_log_term}) but their log index ({candidate_last_log_index}) is lower than mine ({my_last_log_index})");
+                tracing::debug!("won't grant vote to candidate -- our logs are at the same term ({}) but their log index ({candidate_last_log_index}) is lower than mine ({})", log.last_term(), log.len());
             } else {
                 tracing::debug!("granting vote to {candidate_id}");
                 vote_granted = true;
@@ -464,7 +450,7 @@ async fn handle(
                 Body::RequestVoteOk {
                     msg_id: new_msg_id,
                     in_reply_to: msg_id,
-                    term: my_term,
+                    term: current_term,
                     vote_granted,
                 },
             )
@@ -498,13 +484,13 @@ async fn broadcast(
     responder: Option<tokio::sync::mpsc::Sender<Message>>,
     body: Body,
 ) {
-    let ids = query(event_tx.clone(), |responder| Query::GetOtherNodeIds {
+    let Raft { other_node_ids, .. } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
         responder,
     })
     .await;
     let mut receiver_tasks = tokio::task::JoinSet::<Message>::new();
 
-    for destination in ids {
+    for destination in other_node_ids {
         let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
         receiver_tasks.spawn(async move {
             rx.await
@@ -542,29 +528,22 @@ async fn request_votes(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    let my_id = query(event_tx.clone(), |responder| Query::GetNodeId { responder }).await;
-    let other_nodes = query(event_tx.clone(), |responder| Query::GetOtherNodeIds {
+    let Raft {
+        my_id,
+        other_node_ids,
+        log,
+        current_term: my_term_before_the_election,
+        ..
+    } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
         responder,
     })
     .await;
 
     let mut who_voted_for_me: HashSet<String> = Default::default();
-    let my_term_before_the_election = query(event_tx.clone(), |responder| Query::CurrentTerm {
-        responder,
-    })
-    .await;
-    let last_log_index = query(event_tx.clone(), |responder| Query::LastLogIndex {
-        responder,
-    })
-    .await;
-    let last_log_term = query(event_tx.clone(), |responder| Query::LastLogTerm {
-        responder,
-    })
-    .await;
 
     tracing::debug!("i'm now requesting votes. broadcasting request_vote msg");
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(other_nodes.len());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(other_node_ids.len());
     broadcast(
         event_tx.clone(),
         Some(tx),
@@ -572,15 +551,15 @@ async fn request_votes(
             msg_id: 0,
             term: my_term_before_the_election,
             candidate_id: my_id,
-            last_log_index,
-            last_log_term,
+            last_log_index: log.len(),
+            last_log_term: log.last_term(),
         },
     )
     .await;
 
     tracing::debug!("i'm done broadcasting request_vote msg. I'll loop over the responses");
 
-    let mut remaining_response_count = other_nodes.len();
+    let mut remaining_response_count = other_node_ids.len();
     while let Some(response_message) = rx.recv().await {
         tracing::debug!("remaining_response_count: {remaining_response_count}");
         match response_message.body {
@@ -598,16 +577,18 @@ async fn request_votes(
                 .await;
 
                 // record the vote if valid
-                let state =
-                    query(event_tx.clone(), |responder| Query::NodeState { responder }).await;
-                let term = query(event_tx.clone(), |responder| Query::CurrentTerm {
+                let Raft {
+                    node_state,
+                    current_term,
+                    ..
+                } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
                     responder,
                 })
                 .await;
 
-                if matches!(state, NodeState::Candidate)
-                    && term == my_term_before_the_election
-                    && term == voter_term
+                if matches!(node_state, NodeState::Candidate)
+                    && current_term == my_term_before_the_election
+                    && current_term == voter_term
                     && vote_granted
                 {
                     who_voted_for_me.insert(response_message.src);
@@ -666,15 +647,13 @@ pub async fn send(
     dest: String,
     body: Body,
 ) {
-    let (id_tx, id_rx) = tokio::sync::oneshot::channel::<String>();
-
-    event_tx
-        .send(Event::Call(Query::GetNodeId { responder: id_tx }))
-        .await
-        .unwrap();
+    let Raft { my_id, .. } = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+        responder,
+    })
+    .await;
 
     let message = Message {
-        src: id_rx.await.unwrap(),
+        src: my_id,
         dest: dest.to_string(),
         body: body.clone(),
     };
