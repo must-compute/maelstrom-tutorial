@@ -580,6 +580,10 @@ async fn request_votes(
                 {
                     who_voted_for_me.insert(response_message.src);
                     tracing::debug!("who voted for me: {:?}", who_voted_for_me);
+
+                    if who_voted_for_me.len() >= raft.majority_count() {
+                        become_leader(event_tx.clone(), reset_election_deadline_tx.clone()).await;
+                    }
                 }
             }
             _ => {
@@ -670,4 +674,17 @@ async fn become_follower(
         .expect("should be able to reset election deadline when becoming a follower");
     tracing::debug!("I reset the election deadline because I set state to follower of {leader}");
     eprintln!("became follower of {leader} in term {term}");
+}
+
+async fn become_leader(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
+) {
+    let raft_node = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+        responder,
+    })
+    .await;
+    assert!(matches!(raft_node.node_state, NodeState::Candidate));
+    update_raft_with(event_tx, |raft| raft.set_node_state(NodeState::Leader)).await;
+    tracing::debug!("became leader for term {:?}", raft_node.current_term);
 }

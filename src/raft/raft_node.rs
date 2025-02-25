@@ -24,4 +24,13 @@ impl RaftNode {
         self.current_term = new_term;
         self.voted_for = None;
     }
+
+    pub(crate) fn set_node_state(&mut self, new_state: NodeState) {
+        self.node_state = new_state;
+    }
+
+    pub fn majority_count(&self) -> usize {
+        let all_nodes_count = self.other_node_ids.len() + 1;
+        (all_nodes_count / 2) + 1
+    }
 }
