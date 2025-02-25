@@ -530,7 +530,7 @@ async fn request_votes(
     })
     .await;
 
-    let mut who_voted_for_me: HashSet<String> = Default::default();
+    let mut who_voted_for_me: HashSet<String> = HashSet::from([my_id.clone()]);
 
     tracing::debug!("i'm now requesting votes. broadcasting request_vote msg");
 
