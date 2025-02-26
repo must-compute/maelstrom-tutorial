@@ -1,7 +1,9 @@
+use super::message::Message;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub term: usize,
-    pub op: Option<()>,
+    pub op: Option<Message>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

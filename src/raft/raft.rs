@@ -11,7 +11,7 @@ use crate::raft::event::update_raft_with;
 use super::{
     event::{query, Command, Event, Query},
     kv_store::KeyValueStore,
-    log::Log,
+    log::{Entry, Log},
     message::{Body, ErrorCode, Message},
     raft_node::RaftNode,
 };
@@ -356,7 +356,7 @@ async fn handle(
             tracing::debug!("DONE Sending Event::Cast(Command::ReceivedViaMaelstrom)");
         }
         Body::Read { .. } | Body::Write { .. } | Body::Cas { .. } => {
-            let raft = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+            let mut raft = query(event_tx.clone(), |responder| Query::RaftSnapshot {
                 responder,
             })
             .await;
@@ -369,7 +369,23 @@ async fn handle(
                 };
                 send(event_tx.clone(), None, msg.src.clone(), body).await;
             }
-            // TODO append to log before applying to state machine
+
+            raft.log.append(&mut vec![Entry {
+                term: raft.current_term,
+                op: Some(msg.clone()),
+            }]);
+
+            // TODO i would be surprised if this is safe without CAS on raft snapshot
+            event_tx
+                .send(Event::Cast(Command::SetRaftSnapshot(raft)))
+                .await
+                .expect(
+                    "should be able to set raft snapshot when handling a read/write/cas msg body",
+                );
+
+            |raft| ...
+
+            // TODO shouldn't this be guarded by quorum?
             apply_to_state_machine(event_tx.clone(), msg).await;
         }
         Body::InitOk { .. }
