@@ -263,111 +263,6 @@ async fn handle(
             )
             .await;
         }
-        Body::Read { msg_id, key } => {
-            let (tx, rx) = tokio::sync::oneshot::channel::<Option<StateMachineValue>>();
-            event_tx
-                .send(Event::Call(Query::KVRead { key, responder: tx }))
-                .await
-                .expect("should be able to send Read event");
-            let response = rx
-                .await
-                .expect("should be able to read from Read oneshot channel");
-
-            send(
-                event_tx.clone(),
-                None,
-                msg.src,
-                match response {
-                    Some(value) => Body::ReadOk {
-                        msg_id: Some(
-                            query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
-                        ),
-                        in_reply_to: msg_id,
-                        value: serde_json::to_value(&value)
-                            .expect("value should be serializable to json"),
-                    },
-                    None => {
-                        let err = ErrorCode::KeyDoesNotExist;
-                        Body::Error {
-                            in_reply_to: msg_id,
-                            code: err.clone(),
-                            text: err.to_string(),
-                        }
-                    }
-                },
-            )
-            .await
-        }
-        Body::Write { msg_id, key, value } => {
-            let value =
-                serde_json::from_value(value).expect("Write msg should contain valid value");
-            event_tx
-                .send(Event::Cast(Command::KVWrite { key, value }))
-                .await
-                .expect("should be able to send Write event");
-
-            send(
-                event_tx.clone(),
-                None,
-                msg.src,
-                Body::WriteOk {
-                    msg_id: Some(
-                        query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
-                    ),
-                    in_reply_to: msg_id,
-                },
-            )
-            .await
-        }
-        Body::Cas {
-            msg_id,
-            key,
-            from,
-            to,
-        } => {
-            let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
-            let from =
-                serde_json::from_value(from).expect("cas from should have a deserializable value");
-            let to = serde_json::from_value(to).expect("cas to should have a deserializable value");
-
-            event_tx
-                .send(Event::Call(Query::KVCas {
-                    key,
-                    from,
-                    to,
-                    responder: tx,
-                }))
-                .await
-                .expect("should be able to send Cas event");
-
-            let response = rx
-                .await
-                .expect("should be able to read from Cas oneshot channel");
-
-            send(
-                event_tx.clone(),
-                None,
-                msg.src,
-                match response {
-                    Ok(()) => Body::CasOk {
-                        msg_id: Some(
-                            query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
-                        ),
-                        in_reply_to: msg_id,
-                    },
-                    Err(e) => match e.downcast_ref::<ErrorCode>() {
-                        Some(e @ ErrorCode::PreconditionFailed)
-                        | Some(e @ ErrorCode::KeyDoesNotExist) => Body::Error {
-                            in_reply_to: msg_id,
-                            code: e.clone(),
-                            text: e.to_string(),
-                        },
-                        _ => panic!("encountered an unexpected error while processing Cas request"),
-                    },
-                },
-            )
-            .await
-        }
         Body::RequestVote {
             msg_id,
             term: candidate_term,
@@ -459,6 +354,23 @@ async fn handle(
                 .await
                 .unwrap();
             tracing::debug!("DONE Sending Event::Cast(Command::ReceivedViaMaelstrom)");
+        }
+        Body::Read { .. } | Body::Write { .. } | Body::Cas { .. } => {
+            let raft = query(event_tx.clone(), |responder| Query::RaftSnapshot {
+                responder,
+            })
+            .await;
+
+            if raft.node_state != NodeState::Leader {
+                let body = Body::Error {
+                    in_reply_to: msg.body.msg_id(),
+                    code: ErrorCode::TemporarilyUnavailable,
+                    text: "can't read/write/cas from non-leader node".to_string(),
+                };
+                send(event_tx.clone(), None, msg.src.clone(), body).await;
+            }
+            // TODO append to log before applying to state machine
+            apply_to_state_machine(event_tx.clone(), msg).await;
         }
         Body::InitOk { .. }
         | Body::ReadOk { .. }
@@ -686,4 +598,117 @@ async fn become_leader(
     assert!(matches!(raft_node.node_state, NodeState::Candidate));
     update_raft_with(event_tx, |raft| raft.set_node_state(NodeState::Leader)).await;
     tracing::debug!("became leader for term {:?}", raft_node.current_term);
+}
+
+async fn apply_to_state_machine(event_tx: tokio::sync::mpsc::Sender<Event>, msg: Message) {
+    match msg.body {
+        Body::Read { msg_id, key } => {
+            let (tx, rx) = tokio::sync::oneshot::channel::<Option<StateMachineValue>>();
+            event_tx
+                .send(Event::Call(Query::KVRead { key, responder: tx }))
+                .await
+                .expect("should be able to send Read event");
+            let response = rx
+                .await
+                .expect("should be able to read from Read oneshot channel");
+
+            send(
+                event_tx.clone(),
+                None,
+                msg.src,
+                match response {
+                    Some(value) => Body::ReadOk {
+                        msg_id: Some(
+                            query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
+                        ),
+                        in_reply_to: msg_id,
+                        value: serde_json::to_value(&value)
+                            .expect("value should be serializable to json"),
+                    },
+                    None => {
+                        let err = ErrorCode::KeyDoesNotExist;
+                        Body::Error {
+                            in_reply_to: msg_id,
+                            code: err.clone(),
+                            text: err.to_string(),
+                        }
+                    }
+                },
+            )
+            .await
+        }
+        Body::Write { msg_id, key, value } => {
+            let value =
+                serde_json::from_value(value).expect("Write msg should contain valid value");
+            event_tx
+                .send(Event::Cast(Command::KVWrite { key, value }))
+                .await
+                .expect("should be able to send Write event");
+
+            send(
+                event_tx.clone(),
+                None,
+                msg.src,
+                Body::WriteOk {
+                    msg_id: Some(
+                        query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
+                    ),
+                    in_reply_to: msg_id,
+                },
+            )
+            .await
+        }
+        Body::Cas {
+            msg_id,
+            key,
+            from,
+            to,
+        } => {
+            let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+            let from =
+                serde_json::from_value(from).expect("cas from should have a deserializable value");
+            let to = serde_json::from_value(to).expect("cas to should have a deserializable value");
+
+            event_tx
+                .send(Event::Call(Query::KVCas {
+                    key,
+                    from,
+                    to,
+                    responder: tx,
+                }))
+                .await
+                .expect("should be able to send Cas event");
+
+            let response = rx
+                .await
+                .expect("should be able to read from Cas oneshot channel");
+
+            send(
+                event_tx.clone(),
+                None,
+                msg.src,
+                match response {
+                    Ok(()) => Body::CasOk {
+                        msg_id: Some(
+                            query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
+                        ),
+                        in_reply_to: msg_id,
+                    },
+                    Err(e) => match e.downcast_ref::<ErrorCode>() {
+                        Some(e @ ErrorCode::PreconditionFailed)
+                        | Some(e @ ErrorCode::KeyDoesNotExist) => Body::Error {
+                            in_reply_to: msg_id,
+                            code: e.clone(),
+                            text: e.to_string(),
+                        },
+                        _ => panic!("encountered an unexpected error while processing Cas request"),
+                    },
+                },
+            )
+            .await
+        }
+        _ => panic!(
+            "apply_to_state_machine expects a Read/Write/Cas msg but it was given something else."
+        ),
+    }
 }
