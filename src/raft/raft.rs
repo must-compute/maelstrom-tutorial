@@ -661,7 +661,6 @@ async fn become_follower(
     leader: &str,
     term: usize,
 ) {
-    // set node state to follower
     update_raft_with(event_tx, |raft| {
         raft.become_follower_of(leader);
     })
