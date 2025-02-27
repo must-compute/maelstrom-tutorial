@@ -1,6 +1,10 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Mutex,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+    time::Duration,
 };
 
 use super::{kv_store::KeyValueStore, log::Log, raft::NodeState};
@@ -9,7 +13,7 @@ pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
 
 #[derive(Debug)]
-pub struct RaftNode {
+pub(super) struct RaftNode {
     pub current_term: AtomicUsize,
     pub log: Mutex<Log>,
     pub my_id: Mutex<String>,               // TODO use oncelock
@@ -18,6 +22,9 @@ pub struct RaftNode {
     pub voted_for: Mutex<Option<String>>,
     pub state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>, // TODO use dashmap?
     pub next_msg_id: AtomicUsize,
+    pub commit_index: AtomicUsize,
+    pub next_index: Mutex<HashMap<String, usize>>,
+    pub match_index: Mutex<HashMap<String, usize>>,
 }
 
 impl Default for RaftNode {
@@ -33,6 +40,9 @@ impl Default for RaftNode {
             voted_for: Mutex::new(None),
             state_machine: Default::default(),
             next_msg_id: Default::default(),
+            commit_index: Default::default(),
+            next_index: Mutex::new(HashMap::new()),
+            match_index: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -61,5 +71,13 @@ impl RaftNode {
     }
     pub fn reserve_next_msg_id(&self) -> usize {
         self.next_msg_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn match_index(&self) {
+        let mut match_index = self.match_index.lock().unwrap();
+        match_index.insert(
+            self.my_id.lock().unwrap().clone(),
+            self.log.lock().unwrap().len(),
+        );
     }
 }

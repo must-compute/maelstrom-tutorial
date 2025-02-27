@@ -102,6 +102,8 @@ pub async fn run() {
     let mut rng = rand::rng();
     let start = tokio::time::Instant::now() + Duration::from_millis(rng.random_range(1000..=3000));
     let mut election_deadline = tokio::time::interval_at(start, Duration::from_millis(1000));
+    // TODO how much time???
+    let mut replication_interval = tokio::time::interval(Duration::from_millis(100));
     let raft_node = Arc::new(raft);
 
     loop {
@@ -133,6 +135,9 @@ pub async fn run() {
                         become_candidate(event_tx, reset_election_deadline_tx, raft_node).await
                     }
                 });
+            }
+            _ = replication_interval.tick() => {
+
             }
         }
     }
@@ -498,6 +503,8 @@ async fn become_follower(
     term: usize,
 ) {
     *raft_node.node_state.lock().unwrap() = NodeState::FollowerOf(leader.to_owned());
+    *raft_node.match_index.lock().unwrap() = HashMap::new();
+    *raft_node.next_index.lock().unwrap() = HashMap::new();
 
     reset_election_deadline_tx
         .send(())
@@ -515,6 +522,22 @@ async fn become_leader(
     let mut node_state_guard = raft_node.node_state.lock().unwrap();
     assert!(matches!(*node_state_guard, NodeState::Candidate));
     *node_state_guard = NodeState::Leader;
+
+    //todo replicate
+    let mut next_index = raft_node.next_index.lock().unwrap();
+    let mut match_index = raft_node.match_index.lock().unwrap();
+
+    *next_index = Default::default();
+    *match_index = Default::default();
+
+    let other_node_ids = raft_node.other_node_ids.lock().unwrap().clone();
+    let log_len = raft_node.log.lock().unwrap().len().clone();
+    for node_id in other_node_ids {
+        next_index.insert(node_id.clone(), log_len + 1);
+        match_index.insert(node_id, 0);
+    }
+
+    //TODO - kyle has a reset_step_down_deadline thingy here
 
     tracing::debug!(
         "became leader for term {:?}",
