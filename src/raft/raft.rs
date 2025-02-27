@@ -38,12 +38,12 @@ pub async fn run() {
         other_node_ids: Default::default(),
         voted_for: Mutex::new(None),
         state_machine: Default::default(),
+        next_msg_id: Default::default(),
     };
 
     // event handler task
     tokio::spawn(async move {
         let mut unacked: HashMap<usize, tokio::sync::oneshot::Sender<Message>> = Default::default();
-        let mut next_msg_id = 0;
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -84,10 +84,6 @@ pub async fn run() {
                             .send(response)
                             .expect("returning msg ack should work over the oneshot channel");
                     }
-                }
-                Event::Call(Query::ReserveMsgId { responder: tx }) => {
-                    tx.send(next_msg_id).unwrap();
-                    next_msg_id += 1;
                 }
             }
         }
@@ -211,9 +207,7 @@ async fn handle(
                 raft_node.clone(),
                 msg.src,
                 Body::InitOk {
-                    msg_id: Some(
-                        query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
-                    ),
+                    msg_id: Some(raft_node.reserve_next_msg_id()),
                     in_reply_to: msg_id,
                 },
             )
@@ -264,18 +258,13 @@ async fn handle(
                 );
             }
 
-            let new_msg_id = query(event_tx.clone(), |responder| Query::ReserveMsgId {
-                responder,
-            })
-            .await;
-
             send(
                 event_tx,
                 None,
                 raft_node.clone(),
                 msg.src,
                 Body::RequestVoteOk {
-                    msg_id: new_msg_id,
+                    msg_id: raft_node.reserve_next_msg_id(),
                     in_reply_to: msg_id,
                     term: current_term,
                     vote_granted,
@@ -346,10 +335,9 @@ async fn broadcast(
             rx.await
                 .expect("should be able to recv on one of the broadcast responses")
         });
-        let new_msg_id = query(event_tx.clone(), |responder| Query::ReserveMsgId {
-            responder,
-        })
-        .await;
+
+        let new_msg_id = raft_node.reserve_next_msg_id();
+
         let mut body = body.clone();
         body.set_msg_id(new_msg_id);
         send(
@@ -561,12 +549,7 @@ async fn apply_to_state_machine(
 
             let body = match maybe_value {
                 Some(value) => Body::ReadOk {
-                    msg_id: Some(
-                        query(event_tx.clone(), |responder| Query::ReserveMsgId {
-                            responder,
-                        })
-                        .await,
-                    ),
+                    msg_id: Some(raft_node.reserve_next_msg_id()),
                     in_reply_to: msg_id,
                     value: serde_json::to_value(&value)
                         .expect("value should be serializable to json"),
@@ -595,9 +578,7 @@ async fn apply_to_state_machine(
                 raft_node.clone(),
                 msg.src,
                 Body::WriteOk {
-                    msg_id: Some(
-                        query(event_tx, |responder| Query::ReserveMsgId { responder }).await,
-                    ),
+                    msg_id: Some(raft_node.reserve_next_msg_id()),
                     in_reply_to: msg_id,
                 },
             )
@@ -616,12 +597,7 @@ async fn apply_to_state_machine(
             let cas_result = raft_node.state_machine.lock().unwrap().cas(key, from, to);
             let body = match cas_result {
                 Ok(()) => Body::CasOk {
-                    msg_id: Some(
-                        query(event_tx.clone(), |responder| Query::ReserveMsgId {
-                            responder,
-                        })
-                        .await,
-                    ),
+                    msg_id: Some(raft_node.reserve_next_msg_id()),
                     in_reply_to: msg_id,
                 },
                 Err(e) => match e.downcast_ref::<ErrorCode>() {

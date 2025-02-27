@@ -12,9 +12,6 @@ pub enum Event {
 
 // For events with a notifier channel for response
 pub enum Query {
-    ReserveMsgId {
-        responder: ChannelResponder<usize>,
-    },
     SendViaMaelstrom {
         message: Message,
         responder: ChannelResponder<Message>,

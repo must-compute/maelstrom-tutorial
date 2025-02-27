@@ -17,6 +17,7 @@ pub struct RaftNode {
     pub node_state: Mutex<NodeState>,
     pub voted_for: Mutex<Option<String>>,
     pub state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>, // TODO use dashmap?
+    pub next_msg_id: AtomicUsize,
 }
 
 impl RaftNode {
@@ -40,5 +41,8 @@ impl RaftNode {
     pub fn majority_count(&self) -> usize {
         let all_nodes_count = self.other_node_ids.lock().unwrap().len() + 1;
         (all_nodes_count / 2) + 1
+    }
+    pub fn reserve_next_msg_id(&self) -> usize {
+        self.next_msg_id.fetch_add(1, Ordering::SeqCst)
     }
 }
