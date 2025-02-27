@@ -2,19 +2,19 @@ use std::{collections::HashMap, hash::Hash};
 
 use super::message::ErrorCode;
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub(super) struct KeyValueStore<K, V>
 where
-    K: Hash + Eq,
-    V: PartialEq,
+    K: Hash + Eq + Send,
+    V: PartialEq + Send,
 {
     map: HashMap<K, V>,
 }
 
 impl<K, V> KeyValueStore<K, V>
 where
-    K: Hash + Eq,
-    V: PartialEq,
+    K: Hash + Eq + Send,
+    V: PartialEq + Send,
 {
     pub fn read(&self, key: &K) -> Option<&V> {
         self.map.get(key)
