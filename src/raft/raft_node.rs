@@ -11,12 +11,12 @@ pub type StateMachineValue = usize;
 #[derive(Debug)]
 pub struct RaftNode {
     pub current_term: AtomicUsize,
-    pub log: Arc<Mutex<Log>>,
-    pub my_id: Arc<Mutex<String>>,               // TODO use oncelock
-    pub other_node_ids: Arc<Mutex<Vec<String>>>, // TODO use oncelock
-    pub node_state: Arc<Mutex<NodeState>>,
-    pub voted_for: Arc<Mutex<Option<String>>>,
-    pub state_machine: Arc<Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>>, // TODO use dashmap?
+    pub log: Mutex<Log>,
+    pub my_id: Mutex<String>,               // TODO use oncelock
+    pub other_node_ids: Mutex<Vec<String>>, // TODO use oncelock
+    pub node_state: Mutex<NodeState>,
+    pub voted_for: Mutex<Option<String>>,
+    pub state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>, // TODO use dashmap?
 }
 
 impl RaftNode {

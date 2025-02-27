@@ -30,13 +30,13 @@ pub async fn run() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(32);
     let raft = RaftNode {
         current_term: AtomicUsize::new(0),
-        log: Arc::new(Mutex::new(Log::new())),
+        log: Mutex::new(Log::new()),
         my_id: Default::default(),
-        node_state: Arc::new(Mutex::new(NodeState::FollowerOf(
+        node_state: Mutex::new(NodeState::FollowerOf(
             "TODO DETERMINE A SANE DEFAULT".to_string(),
-        ))),
+        )),
         other_node_ids: Default::default(),
-        voted_for: Arc::new(Mutex::new(None)),
+        voted_for: Mutex::new(None),
         state_machine: Default::default(),
     };
 
