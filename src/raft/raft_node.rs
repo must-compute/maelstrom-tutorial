@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Mutex,
 };
 
 use super::{kv_store::KeyValueStore, log::Log, raft::NodeState};
@@ -18,6 +18,23 @@ pub struct RaftNode {
     pub voted_for: Mutex<Option<String>>,
     pub state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>, // TODO use dashmap?
     pub next_msg_id: AtomicUsize,
+}
+
+impl Default for RaftNode {
+    fn default() -> Self {
+        Self {
+            current_term: Default::default(),
+            log: Mutex::new(Log::new()),
+            my_id: Default::default(),
+            node_state: Mutex::new(NodeState::FollowerOf(
+                "TODO DETERMINE A SANE DEFAULT".to_string(),
+            )),
+            other_node_ids: Default::default(),
+            voted_for: Mutex::new(None),
+            state_machine: Default::default(),
+            next_msg_id: Default::default(),
+        }
+    }
 }
 
 impl RaftNode {

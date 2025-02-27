@@ -28,18 +28,7 @@ pub enum NodeState {
 pub async fn run() {
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(32);
-    let raft = RaftNode {
-        current_term: AtomicUsize::new(0),
-        log: Mutex::new(Log::new()),
-        my_id: Default::default(),
-        node_state: Mutex::new(NodeState::FollowerOf(
-            "TODO DETERMINE A SANE DEFAULT".to_string(),
-        )),
-        other_node_ids: Default::default(),
-        voted_for: Mutex::new(None),
-        state_machine: Default::default(),
-        next_msg_id: Default::default(),
-    };
+    let raft: RaftNode = Default::default();
 
     // event handler task
     tokio::spawn(async move {
