@@ -1,22 +1,20 @@
 use std::{
+    cmp::{max, min},
     collections::{HashMap, HashSet},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
 use rand::Rng;
 
 use super::{
-    event::{query, Command, Event, Query},
-    log::{Entry, Log},
+    event::{Command, Event, Query},
+    log::Entry,
     message::{Body, ErrorCode, Message},
     raft_node::RaftNode,
 };
 
-type LeaderId = String;
+pub(super) type LeaderId = String;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeState {
@@ -98,12 +96,14 @@ pub async fn run() {
 
     let (reset_election_deadline_tx, mut reset_election_deadline_rx) =
         tokio::sync::mpsc::channel::<()>(32);
+    let (reset_replication_deadline_tx, mut reset_replication_deadline_rx) =
+        tokio::sync::mpsc::channel::<()>(32);
 
     let mut rng = rand::rng();
     let start = tokio::time::Instant::now() + Duration::from_millis(rng.random_range(1000..=3000));
     let mut election_deadline = tokio::time::interval_at(start, Duration::from_millis(1000));
+    let mut replication_deadline = tokio::time::interval(Duration::from_millis(100));
     // TODO how much time???
-    let mut replication_interval = tokio::time::interval(Duration::from_millis(100));
     let raft_node = Arc::new(raft);
 
     loop {
@@ -136,8 +136,21 @@ pub async fn run() {
                     }
                 });
             }
-            _ = replication_interval.tick() => {
-
+            _ = reset_replication_deadline_rx.recv() => {
+                    replication_deadline.reset(); // TODO probably use the same method in election resetting?
+                }
+            _ = replication_deadline.tick() => {
+                tokio::spawn({
+                    let event_tx = event_tx.clone();
+                    let reset_election_deadline_tx = reset_election_deadline_tx.clone();
+                    let reset_replication_deadline_tx = reset_replication_deadline_tx.clone();
+                    let raft_node = raft_node.clone();
+                    async move {
+                        if *raft_node.node_state.lock().unwrap() == NodeState::Leader {
+                            replicate_log(event_tx, reset_election_deadline_tx, reset_replication_deadline_tx, raft_node).await;
+                        }
+                    }
+                });
             }
         }
     }
@@ -267,17 +280,132 @@ async fn handle(
             .await;
             tracing::debug!("called send(RequestVoteOk) from handler of RequestVote");
         }
-        Body::RequestVoteOk { .. } => {
-            tracing::debug!(
-                "RECEIVED Body::RequestVoteOk. Sending Event::Cast(Command::ReceivedViaMaelstrom)"
-            );
+        Body::AppendEntries {
+            msg_id,
+            term: leader_term,
+            leader_id,
+            prev_log_index,
+            prev_log_term,
+            mut entries,
+            leader_commit,
+        } => {
+            step_down_if_needed(
+                event_tx.clone(),
+                reset_election_deadline_tx.clone(),
+                raft_node.clone(),
+                leader_term,
+            )
+            .await;
+
+            let my_term = raft_node.current_term.load(Ordering::SeqCst);
+            let response_body = Body::AppendEntriesOk {
+                msg_id: raft_node.reserve_next_msg_id(),
+                in_reply_to: msg_id,
+                term: my_term,
+                success: false,
+            };
+
+            if leader_term < my_term {
+                send(
+                    event_tx.clone(),
+                    None,
+                    raft_node.clone(),
+                    msg.src.clone(),
+                    response_body,
+                )
+                .await;
+                return;
+            }
+
+            reset_election_deadline_tx.send(()).await.expect("should be able to reset election deadline when receiving AppendEntriesRPC from leader");
+
+            if prev_log_index <= 0 {
+                send(
+                    event_tx.clone(),
+                    None,
+                    raft_node.clone(),
+                    msg.src.clone(),
+                    Body::Error {
+                        in_reply_to: msg_id,
+                        code: ErrorCode::Abort,
+                        text: format!("out of bounds prev_log_index: {prev_log_index}"),
+                    },
+                )
+                .await;
+            }
+
+            let mut should_reject_request = false;
+            {
+                let log_guard = raft_node.log.lock().unwrap();
+                let prev_entry = log_guard.get(prev_log_index);
+                should_reject_request =
+                    prev_entry.is_none() || prev_entry.is_some_and(|e| e.term != prev_log_term);
+            }
+
+            if should_reject_request {
+                send(
+                    event_tx.clone(),
+                    None,
+                    raft_node.clone(),
+                    msg.src.clone(),
+                    response_body,
+                )
+                .await;
+                return;
+            }
+
+            // at this point we can conclude that we agree with the leader on the previous term
+            {
+                let mut log_guard = raft_node.log.lock().unwrap();
+                log_guard.discard_after(prev_log_index);
+                log_guard.append(&mut entries);
+            }
+
+            //        if @commit_index < body[:leader_commit]
+            //   @commit_index = [@log.size, body[:leader_commit]].min
+            // end
+
+            if leader_commit > raft_node.commit_index.load(Ordering::SeqCst) {
+                let my_new_commit_index = min(leader_commit, raft_node.log.lock().unwrap().len());
+                raft_node
+                    .commit_index
+                    .store(my_new_commit_index, Ordering::SeqCst);
+            }
+
+            // TODO make the response code below more concise.
+            let Body::AppendEntriesOk {
+                msg_id,
+                in_reply_to,
+                term,
+                ..
+            } = response_body
+            else {
+                unreachable!()
+            };
+
+            let response_body = Body::AppendEntriesOk {
+                msg_id,
+                in_reply_to,
+                term,
+                success: true,
+            };
+
+            send(
+                event_tx.clone(),
+                None,
+                raft_node.clone(),
+                msg.src.clone(),
+                response_body,
+            )
+            .await;
+        }
+        Body::RequestVoteOk { .. } | Body::AppendEntriesOk { .. } => {
             event_tx
                 .send(Event::Cast(Command::ReceivedViaMaelstrom {
                     response: msg.clone(),
                 }))
                 .await
                 .unwrap();
-            tracing::debug!("DONE Sending Event::Cast(Command::ReceivedViaMaelstrom)");
         }
         Body::Read { .. } | Body::Write { .. } | Body::Cas { .. } => {
             if *raft_node.node_state.lock().unwrap() != NodeState::Leader {
@@ -475,7 +603,7 @@ async fn step_down_if_needed(
     }
 }
 
-pub async fn send(
+async fn send(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     responder: Option<tokio::sync::oneshot::Sender<Message>>,
     raft_node: Arc<RaftNode>,
@@ -628,5 +756,114 @@ async fn apply_to_state_machine(
         _ => panic!(
             "apply_to_state_machine expects a Read/Write/Cas msg but it was given something else."
         ),
+    }
+}
+
+async fn replicate_log(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
+    reset_replication_deadline_tx: tokio::sync::mpsc::Sender<()>,
+    raft_node: Arc<RaftNode>,
+) {
+    let current_term = raft_node.current_term.load(Ordering::SeqCst);
+    let my_id = raft_node.my_id.lock().unwrap().clone();
+    let other_node_ids = raft_node.other_node_ids.lock().unwrap().clone();
+
+    for node in other_node_ids {
+        let next_index_to_send = *raft_node
+            .next_index
+            .lock()
+            .unwrap()
+            .get(&node)
+            .unwrap_or(&0);
+
+        let log = raft_node.log.lock().unwrap().clone();
+        let entries = log.from_index_till_end(next_index_to_send);
+
+        let prev_log_index = next_index_to_send - 1;
+        let prev_log_term = raft_node
+            .log
+            .lock()
+            .unwrap()
+            .get(prev_log_index)
+            .map_or(0, |entry| entry.term);
+        let leader_commit = raft_node.commit_index.load(Ordering::SeqCst);
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
+        let body = Body::AppendEntries {
+            msg_id: raft_node.reserve_next_msg_id(),
+            term: current_term.clone(),
+            leader_id: my_id.clone(),
+            prev_log_index,
+            prev_log_term,
+            entries: entries.into(),
+            leader_commit,
+        };
+        send(
+            event_tx.clone(),
+            Some(tx),
+            raft_node.clone(),
+            node.clone(),
+            body,
+        )
+        .await;
+
+        let response = rx
+            .await
+            .expect("should receive a response to AppendEntries msg");
+
+        match response.body {
+            Body::AppendEntriesOk {
+                success,
+                term: voter_term,
+                ..
+            } => {
+                step_down_if_needed(
+                    event_tx.clone(),
+                    reset_election_deadline_tx.clone(),
+                    raft_node.clone(),
+                    voter_term,
+                )
+                .await;
+                if success {
+                    let mut next_index_guard = raft_node.next_index.lock().unwrap();
+                    let updated_next_index_entry = max(
+                        *next_index_guard.get(&node).unwrap_or(&0),
+                        next_index_to_send + entries.len(),
+                    );
+                    next_index_guard.insert(node.clone(), updated_next_index_entry);
+                    std::mem::drop(next_index_guard);
+
+                    let mut match_index_guard = raft_node.match_index.lock().unwrap();
+                    let updated_match_index_entry = max(
+                        *match_index_guard.get(&node).unwrap_or(&0),
+                        next_index_to_send + entries.len() - 1,
+                    );
+                    match_index_guard.insert(node.clone(), updated_match_index_entry);
+                    std::mem::drop(match_index_guard);
+
+                    tracing::debug!(
+                        "successfully replicated to {node}. Next index: {:?}",
+                        raft_node.next_index.lock().unwrap()
+                    );
+                } else {
+                    // replication request was rejected. We can infer it's due to an index mismatch, so we decrement
+                    // the next index to send (for the future re-attempt of replication).
+                    raft_node
+                        .next_index
+                        .lock()
+                        .unwrap()
+                        .entry(node)
+                        .and_modify(|next_index| *next_index -= 1);
+                }
+            }
+            _ => panic!("expected AppendEntriesOk in response to AppendEntries"),
+        };
+
+        // TODO I don't know if this is the right place for reset
+        reset_replication_deadline_tx
+            .send(())
+            .await
+            .expect("should be able to reset replication deadline after replication");
     }
 }

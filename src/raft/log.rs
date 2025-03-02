@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use super::message::Message;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub term: usize,
     pub op: Option<Message>,
@@ -35,5 +37,13 @@ impl Log {
             .last()
             .expect("append-only Log should never be empty")
             .term
+    }
+
+    pub fn from_index_till_end(&self, index: usize) -> &[Entry] {
+        &self.entries[index..]
+    }
+
+    pub fn discard_after(&mut self, index: usize) {
+        self.entries.truncate(index);
     }
 }

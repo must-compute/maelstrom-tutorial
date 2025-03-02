@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
+use super::{log::Entry, raft::LeaderId};
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Message {
     pub src: String,
@@ -67,6 +69,21 @@ pub enum Body {
         term: usize,
         vote_granted: bool,
     },
+    AppendEntries {
+        msg_id: usize,
+        term: usize,
+        leader_id: LeaderId,
+        prev_log_index: usize,
+        prev_log_term: usize,
+        entries: Vec<Entry>,
+        leader_commit: usize,
+    },
+    AppendEntriesOk {
+        msg_id: usize,
+        in_reply_to: usize,
+        term: usize,
+        success: bool,
+    },
 }
 
 impl Body {
@@ -80,9 +97,11 @@ impl Body {
             Body::WriteOk { msg_id, .. } => msg_id.unwrap(),
             Body::Cas { msg_id, .. } => *msg_id,
             Body::CasOk { msg_id, .. } => msg_id.unwrap(),
-            Body::Error { .. } => panic!("error msgs have no msg id"),
             Body::RequestVote { msg_id, .. } => *msg_id,
-            Body::RequestVoteOk { msg_id, .. } => *msg_id, // this inidicates an issue with the body type. TODO cleaner design
+            Body::RequestVoteOk { msg_id, .. } => *msg_id,
+            Body::AppendEntries { msg_id, .. } => *msg_id,
+            Body::AppendEntriesOk { msg_id, .. } => *msg_id, // this inidicates an issue with the body type. TODO cleaner design
+            Body::Error { .. } => panic!("error msgs have no msg id"),
         }
     }
     pub fn set_msg_id(&mut self, new_msg_id: usize) {
@@ -95,9 +114,12 @@ impl Body {
             Body::WriteOk { ref mut msg_id, .. } => *msg_id = Some(new_msg_id),
             Body::Cas { ref mut msg_id, .. } => *msg_id = new_msg_id,
             Body::CasOk { ref mut msg_id, .. } => *msg_id = Some(new_msg_id),
-            Body::Error { .. } => panic!("error msgs have no msg id"),
             Body::RequestVote { ref mut msg_id, .. } => *msg_id = new_msg_id,
-            Body::RequestVoteOk { ref mut msg_id, .. } => *msg_id = new_msg_id, // this inidicates an issue with the body type. TODO cleaner design
+            Body::RequestVoteOk { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            Body::AppendEntries { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            Body::AppendEntriesOk { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            // this inidicates an issue with the body type. TODO cleaner design
+            Body::Error { .. } => panic!("error msgs have no msg id"),
         }
     }
     pub fn in_reply_to(&self) -> usize {
@@ -107,12 +129,14 @@ impl Body {
             Body::CasOk { in_reply_to, .. } => *in_reply_to,
             Body::Error { in_reply_to, .. } => *in_reply_to,
             Body::RequestVoteOk { in_reply_to, .. } => *in_reply_to,
+            Body::AppendEntriesOk { in_reply_to, .. } => *in_reply_to,
             Body::Init { .. }
             | Body::InitOk { .. }
             | Body::Read { .. }
             | Body::Write { .. }
             | Body::Cas { .. }
-            | Body::RequestVote { .. } => panic!("in_reply_to not supported for {:?}", self),
+            | Body::RequestVote { .. }
+            | Body::AppendEntries { .. } => panic!("in_reply_to not supported for {:?}", self),
         }
     }
 }
