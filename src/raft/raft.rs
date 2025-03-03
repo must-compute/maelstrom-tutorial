@@ -627,7 +627,7 @@ async fn step_down_if_needed(
         become_follower(
             reset_election_deadline_tx.clone(),
             raft_node.clone(),
-            "TODO LEADER",
+            None,
             voter_term,
         )
         .await;
@@ -658,10 +658,10 @@ async fn send(
 async fn become_follower(
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
     raft_node: Arc<RaftNode>,
-    leader: &str,
+    leader: Option<LeaderId>,
     term: usize,
 ) {
-    *raft_node.node_state.lock().unwrap() = NodeState::FollowerOf(Some(leader.to_owned()));
+    *raft_node.node_state.lock().unwrap() = NodeState::FollowerOf(leader.clone());
     *raft_node.match_index.lock().unwrap() = HashMap::new();
     *raft_node.next_index.lock().unwrap() = HashMap::new();
 
@@ -669,8 +669,11 @@ async fn become_follower(
         .send(())
         .await
         .expect("should be able to reset election deadline when becoming a follower");
-    tracing::debug!("I reset the election deadline because I set state to follower of {leader}");
-    tracing::debug!("became follower of {leader} in term {term}");
+    tracing::debug!(
+        "I reset the election deadline because I set state to follower of {:?}",
+        leader
+    );
+    tracing::debug!("became follower of {:?} in term {term}", leader);
 }
 
 async fn become_leader(
