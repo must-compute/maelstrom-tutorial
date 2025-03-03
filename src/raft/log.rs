@@ -40,7 +40,7 @@ impl Log {
     }
 
     pub fn from_index_till_end(&self, index: usize) -> &[Entry] {
-        &self.entries[index..]
+        &self.entries[(index - 1)..]
     }
 
     pub fn discard_after(&mut self, index: usize) {
