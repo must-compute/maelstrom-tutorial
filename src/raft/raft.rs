@@ -769,30 +769,22 @@ async fn replicate_log(
     let my_id = raft_node.my_id.lock().unwrap().clone();
     let other_node_ids = raft_node.other_node_ids.lock().unwrap().clone();
 
-    for node in other_node_ids {
-        let next_index_to_send = *raft_node
-            .next_index
-            .lock()
-            .unwrap()
-            .get(&node)
-            .unwrap_or(&0);
+    let next_index = raft_node.next_index.lock().unwrap().clone();
+    let log = raft_node.log.lock().unwrap().clone();
+    let leader_commit = raft_node.commit_index.load(Ordering::SeqCst);
 
-        let log = raft_node.log.lock().unwrap().clone();
+    for node in other_node_ids {
+        let next_index_to_send = *next_index.get(&node).unwrap_or(&0);
+
         let entries = log.from_index_till_end(next_index_to_send);
 
         let prev_log_index = next_index_to_send - 1;
-        let prev_log_term = raft_node
-            .log
-            .lock()
-            .unwrap()
-            .get(prev_log_index)
-            .map_or(0, |entry| entry.term);
-        let leader_commit = raft_node.commit_index.load(Ordering::SeqCst);
+        let prev_log_term = log.get(prev_log_index).map_or(0, |entry| entry.term);
 
         let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
         let body = Body::AppendEntries {
             msg_id: raft_node.reserve_next_msg_id(),
-            term: current_term.clone(),
+            term: current_term,
             leader_id: my_id.clone(),
             prev_log_index,
             prev_log_term,
