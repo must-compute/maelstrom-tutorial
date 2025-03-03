@@ -671,8 +671,6 @@ async fn become_follower(
     term: usize,
 ) {
     *raft_node.node_state.lock().unwrap() = NodeState::FollowerOf(leader.clone());
-    *raft_node.match_index.lock().unwrap() = HashMap::new();
-    *raft_node.next_index.lock().unwrap() = HashMap::new();
 
     reset_election_deadline_tx
         .send(())
