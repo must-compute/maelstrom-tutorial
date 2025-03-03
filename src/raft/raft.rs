@@ -361,10 +361,6 @@ async fn handle(
                 log_guard.append(&mut entries);
             }
 
-            //        if @commit_index < body[:leader_commit]
-            //   @commit_index = [@log.size, body[:leader_commit]].min
-            // end
-
             if leader_commit > raft_node.commit_index.load(Ordering::SeqCst) {
                 let my_new_commit_index = min(leader_commit, raft_node.log.lock().unwrap().len());
                 raft_node
@@ -772,9 +768,18 @@ async fn replicate_log(
     let next_index = raft_node.next_index.lock().unwrap().clone();
     let log = raft_node.log.lock().unwrap().clone();
     let leader_commit = raft_node.commit_index.load(Ordering::SeqCst);
+    tracing::debug!(
+        "wwwwwww next_index: {:?}. Log len: {:?}",
+        next_index,
+        log.len()
+    );
 
     for node in other_node_ids {
         let next_index_to_send = *next_index.get(&node).unwrap_or(&0);
+        tracing::debug!(
+            "vvvvvvv next_index_to_send: {next_index_to_send}. Log len: {:?}",
+            log.len()
+        );
 
         let entries = log.from_index_till_end(next_index_to_send);
 
