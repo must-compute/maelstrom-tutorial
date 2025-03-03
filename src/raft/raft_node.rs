@@ -33,9 +33,7 @@ impl Default for RaftNode {
             current_term: Default::default(),
             log: Mutex::new(Log::new()),
             my_id: Default::default(),
-            node_state: Mutex::new(NodeState::FollowerOf(
-                "TODO DETERMINE A SANE DEFAULT".to_string(),
-            )),
+            node_state: Mutex::new(NodeState::FollowerOf(None)),
             other_node_ids: Default::default(),
             voted_for: Mutex::new(None),
             state_machine: Default::default(),

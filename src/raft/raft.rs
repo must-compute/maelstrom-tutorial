@@ -20,7 +20,7 @@ pub(super) type LeaderId = String;
 pub enum NodeState {
     Leader,
     Candidate,
-    FollowerOf(LeaderId),
+    FollowerOf(Option<LeaderId>),
 }
 
 pub async fn run() {
@@ -100,9 +100,9 @@ pub async fn run() {
         tokio::sync::mpsc::channel::<()>(32);
 
     let mut rng = rand::rng();
-    let start = tokio::time::Instant::now() + Duration::from_millis(rng.random_range(1000..=3000));
-    let mut election_deadline = tokio::time::interval_at(start, Duration::from_millis(1000));
-    let mut replication_deadline = tokio::time::interval(Duration::from_millis(100));
+    let start = tokio::time::Instant::now() + Duration::from_millis(rng.random_range(100..=300));
+    let mut election_deadline = tokio::time::interval_at(start, Duration::from_millis(100));
+    let mut replication_deadline = tokio::time::interval(Duration::from_millis(50));
     // TODO how much time???
     let raft_node = Arc::new(raft);
 
@@ -117,7 +117,7 @@ pub async fn run() {
                 });
             }
             _ = reset_election_deadline_rx.recv() => {
-                    let new_duration = Duration::from_millis(rng.random_range(1000..=3000));
+                    let new_duration = Duration::from_millis(rng.random_range(100..=300));
                     let new_election_deadline =
                         tokio::time::interval_at(tokio::time::Instant::now() + new_duration, new_duration);
                     eprintln!(
@@ -317,6 +317,12 @@ async fn handle(
                 return;
             }
 
+            // i am follower, and now i now know the leader.
+            assert!(matches!(
+                *raft_node.node_state.lock().unwrap(),
+                NodeState::FollowerOf(..)
+            ));
+            *raft_node.node_state.lock().unwrap() = NodeState::FollowerOf(Some(leader_id));
             reset_election_deadline_tx.send(()).await.expect("should be able to reset election deadline when receiving AppendEntriesRPC from leader");
 
             if prev_log_index <= 0 {
@@ -404,29 +410,58 @@ async fn handle(
                 .unwrap();
         }
         Body::Read { .. } | Body::Write { .. } | Body::Cas { .. } => {
-            if *raft_node.node_state.lock().unwrap() != NodeState::Leader {
-                let body = Body::Error {
-                    in_reply_to: msg.body.msg_id(),
-                    code: ErrorCode::TemporarilyUnavailable,
-                    text: "can't read/write/cas from non-leader node".to_string(),
-                };
-                send(
-                    event_tx.clone(),
-                    None,
-                    raft_node.clone(),
-                    msg.src.clone(),
-                    body,
-                )
-                .await;
+            let node_state = raft_node.node_state.lock().unwrap().clone();
+            match node_state {
+                NodeState::Leader => {
+                    raft_node.log.lock().unwrap().append(&mut vec![Entry {
+                        term: raft_node.current_term.load(Ordering::SeqCst),
+                        op: Some(msg.clone()),
+                    }]);
+
+                    // TODO shouldn't this be guarded by quorum?
+                    apply_to_state_machine(event_tx.clone(), raft_node.clone(), msg).await;
+                }
+                NodeState::FollowerOf(Some(leader_id)) => {
+                    // act as a proxy between the leader and the client.
+                    let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
+                    send(
+                        event_tx.clone(),
+                        Some(tx),
+                        raft_node.clone(),
+                        leader_id,
+                        msg.body,
+                    )
+                    .await;
+
+                    let response = rx
+                        .await
+                        .expect("should proxy response to msg between client and leader");
+
+                    send(
+                        event_tx.clone(),
+                        None,
+                        raft_node.clone(),
+                        msg.src,
+                        response.body,
+                    )
+                    .await;
+                }
+                NodeState::FollowerOf(None) | NodeState::Candidate => {
+                    let body = Body::Error {
+                        in_reply_to: msg.body.msg_id(),
+                        code: ErrorCode::TemporarilyUnavailable,
+                        text: "can't read/write/cas from non-leader node".to_string(),
+                    };
+                    send(
+                        event_tx.clone(),
+                        None,
+                        raft_node.clone(),
+                        msg.src.clone(),
+                        body,
+                    )
+                    .await;
+                }
             }
-
-            raft_node.log.lock().unwrap().append(&mut vec![Entry {
-                term: raft_node.current_term.load(Ordering::SeqCst),
-                op: Some(msg.clone()),
-            }]);
-
-            // TODO shouldn't this be guarded by quorum?
-            apply_to_state_machine(event_tx.clone(), raft_node.clone(), msg).await;
         }
         Body::InitOk { .. }
         | Body::ReadOk { .. }
@@ -626,7 +661,7 @@ async fn become_follower(
     leader: &str,
     term: usize,
 ) {
-    *raft_node.node_state.lock().unwrap() = NodeState::FollowerOf(leader.to_owned());
+    *raft_node.node_state.lock().unwrap() = NodeState::FollowerOf(Some(leader.to_owned()));
     *raft_node.match_index.lock().unwrap() = HashMap::new();
     *raft_node.next_index.lock().unwrap() = HashMap::new();
 
