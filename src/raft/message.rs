@@ -139,6 +139,49 @@ impl Body {
             | Body::AppendEntries { .. } => panic!("in_reply_to not supported for {:?}", self),
         }
     }
+    pub fn set_in_reply_to(&mut self, new_in_reply_to: usize) {
+        match self {
+            Body::InitOk {
+                ref mut in_reply_to,
+                ..
+            }
+            | Body::ReadOk {
+                ref mut in_reply_to,
+                ..
+            }
+            | Body::WriteOk {
+                ref mut in_reply_to,
+                ..
+            }
+            | Body::CasOk {
+                ref mut in_reply_to,
+                ..
+            }
+            | Body::Error {
+                ref mut in_reply_to,
+                ..
+            }
+            | Body::RequestVoteOk {
+                ref mut in_reply_to,
+                ..
+            }
+            | Body::AppendEntriesOk {
+                ref mut in_reply_to,
+                ..
+            } => {
+                *in_reply_to = new_in_reply_to;
+            }
+
+            Body::Init { .. }
+            | Body::Read { .. }
+            | Body::Write { .. }
+            | Body::Cas { .. }
+            | Body::RequestVote { .. }
+            | Body::AppendEntries { .. } => {
+                panic!("trying to set in_reply_to on a body that doesnt have such field")
+            }
+        }
+    }
 }
 
 // https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md#errors

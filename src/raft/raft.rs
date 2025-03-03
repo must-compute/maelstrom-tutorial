@@ -435,7 +435,7 @@ async fn handle(
                         .await
                         .expect("should proxy response to msg between client and leader");
 
-                    response.body.set_msg_id(client_msg_id);
+                    response.body.set_in_reply_to(client_msg_id);
 
                     send(
                         event_tx.clone(),
