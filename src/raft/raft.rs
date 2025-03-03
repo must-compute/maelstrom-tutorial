@@ -401,14 +401,6 @@ async fn handle(
             )
             .await;
         }
-        Body::RequestVoteOk { .. } | Body::AppendEntriesOk { .. } => {
-            event_tx
-                .send(Event::Cast(Command::ReceivedViaMaelstrom {
-                    response: msg.clone(),
-                }))
-                .await
-                .unwrap();
-        }
         Body::Read { .. } | Body::Write { .. } | Body::Cas { .. } => {
             let node_state = raft_node.node_state.lock().unwrap().clone();
             match node_state {
@@ -423,19 +415,27 @@ async fn handle(
                 }
                 NodeState::FollowerOf(Some(leader_id)) => {
                     // act as a proxy between the leader and the client.
+
+                    let client_msg_id = msg.body.msg_id();
+
+                    let mut body_to_forward = msg.body.clone();
+                    body_to_forward.set_msg_id(raft_node.reserve_next_msg_id());
+
                     let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
                     send(
                         event_tx.clone(),
                         Some(tx),
                         raft_node.clone(),
                         leader_id,
-                        msg.body,
+                        body_to_forward,
                     )
                     .await;
 
-                    let response = rx
+                    let mut response = rx
                         .await
                         .expect("should proxy response to msg between client and leader");
+
+                    response.body.set_msg_id(client_msg_id);
 
                     send(
                         event_tx.clone(),
@@ -467,7 +467,16 @@ async fn handle(
         | Body::ReadOk { .. }
         | Body::WriteOk { .. }
         | Body::CasOk { .. }
-        | Body::Error { .. } => panic!(),
+        | Body::Error { .. }
+        | Body::RequestVoteOk { .. }
+        | Body::AppendEntriesOk { .. } => {
+            event_tx
+                .send(Event::Cast(Command::ReceivedViaMaelstrom {
+                    response: msg.clone(),
+                }))
+                .await
+                .unwrap();
+        }
     }
     ()
 }
