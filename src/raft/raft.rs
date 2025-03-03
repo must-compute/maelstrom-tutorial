@@ -890,6 +890,7 @@ async fn replicate_log(
                         "successfully replicated to {node}. Next index: {:?}",
                         raft_node.next_index.lock().unwrap()
                     );
+                    raft_node.advance_commit_index();
                 } else {
                     // replication request was rejected. We can infer it's due to an index mismatch, so we decrement
                     // the next index to send (for the future re-attempt of replication).

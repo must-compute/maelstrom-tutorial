@@ -37,9 +37,9 @@ elif [ "$1" = "g-counter" ]; then
 elif [ "$1" = "datomic" ]; then
   cargo build && $MAELSTROM test -w txn-list-append --bin $BINARY --time-limit 10 --log-stderr --node-count 2 --rate 100
 elif [ "$1" = "raft" ]; then
-  cargo build && $MAELSTROM test -w lin-kv --bin $BINARY --time-limit 10 --log-stderr --node-count 3 --concurrency 2n --rate 100
+  cargo build && $MAELSTROM test -w lin-kv --bin $BINARY --time-limit 30 --log-stderr --node-count 3 --concurrency 2n --rate 100
 elif [ "$1" = "raft-nemesis" ]; then
-  cargo build && $MAELSTROM test -w lin-kv --bin $BINARY --time-limit 60 --log-stderr --node-count 3 --concurrency 2n --rate 1
+  cargo build && $MAELSTROM test -w lin-kv --bin $BINARY --time-limit 30 --log-stderr --node-count 3 --concurrency 2n --rate 1 --nemesis partition --nemesis-interval 10
 else
   echo "unknown command"
 fi

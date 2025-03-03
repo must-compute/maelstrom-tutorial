@@ -67,15 +67,36 @@ impl RaftNode {
         let all_nodes_count = self.other_node_ids.lock().unwrap().len() + 1;
         (all_nodes_count / 2) + 1
     }
+
+    pub fn median_match_index_value(&self) -> usize {
+        let mut indices = self.match_index().into_values().collect::<Vec<usize>>();
+        indices.sort();
+        let median = indices.len() - self.majority_count();
+        indices[median]
+    }
+
     pub fn reserve_next_msg_id(&self) -> usize {
         self.next_msg_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn match_index(&self) {
+    pub fn match_index(&self) -> HashMap<String, usize> {
         let mut match_index = self.match_index.lock().unwrap();
         match_index.insert(
             self.my_id.lock().unwrap().clone(),
             self.log.lock().unwrap().len(),
         );
+        match_index.clone()
+    }
+
+    pub fn advance_commit_index(&self) {
+        // TODO is it safe to assume we only get called her by the leader?
+        let n = self.median_match_index_value(); // called n per the raft paper.
+        let term_of_n = self.log.lock().unwrap().get(n).unwrap().term;
+        let should_advance_commit_index = n > self.commit_index.load(Ordering::SeqCst)
+            && term_of_n == self.current_term.load(Ordering::SeqCst);
+        if should_advance_commit_index {
+            self.commit_index.store(n, Ordering::SeqCst);
+            tracing::debug!("advanced commit index to: {n}");
+        }
     }
 }
