@@ -4,7 +4,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
     },
-    time::Duration,
 };
 
 use super::{kv_store::KeyValueStore, log::Log, raft::NodeState};
@@ -25,6 +24,7 @@ pub(super) struct RaftNode {
     pub commit_index: AtomicUsize,
     pub next_index: Mutex<HashMap<String, usize>>,
     pub match_index: Mutex<HashMap<String, usize>>,
+    pub last_applied: AtomicUsize,
 }
 
 impl Default for RaftNode {
@@ -41,6 +41,7 @@ impl Default for RaftNode {
             commit_index: Default::default(),
             next_index: Mutex::new(HashMap::new()),
             match_index: Mutex::new(HashMap::new()),
+            last_applied: AtomicUsize::new(1),
         }
     }
 }
@@ -86,17 +87,5 @@ impl RaftNode {
             self.log.lock().unwrap().len(),
         );
         match_index.clone()
-    }
-
-    pub fn advance_commit_index(&self) {
-        // TODO is it safe to assume we only get called her by the leader?
-        let n = self.median_match_index_value(); // called n per the raft paper.
-        let term_of_n = self.log.lock().unwrap().get(n).unwrap().term;
-        let should_advance_commit_index = n > self.commit_index.load(Ordering::SeqCst)
-            && term_of_n == self.current_term.load(Ordering::SeqCst);
-        if should_advance_commit_index {
-            self.commit_index.store(n, Ordering::SeqCst);
-            tracing::debug!("advanced commit index to: {n}");
-        }
     }
 }

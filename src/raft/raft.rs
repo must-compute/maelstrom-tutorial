@@ -372,6 +372,7 @@ async fn handle(
                 raft_node
                     .commit_index
                     .store(my_new_commit_index, Ordering::SeqCst);
+                advance_state_machine(event_tx.clone(), raft_node.clone()).await;
             }
 
             // TODO make the response code below more concise.
@@ -409,9 +410,6 @@ async fn handle(
                         term: raft_node.current_term.load(Ordering::SeqCst),
                         op: Some(msg.clone()),
                     }]);
-
-                    // TODO shouldn't this be guarded by quorum?
-                    apply_to_state_machine(event_tx.clone(), raft_node.clone(), msg).await;
                 }
                 NodeState::FollowerOf(Some(leader_id)) => {
                     // act as a proxy between the leader and the client.
@@ -800,6 +798,49 @@ async fn apply_to_state_machine(
     }
 }
 
+async fn advance_commit_index(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    raft_node: Arc<RaftNode>,
+) {
+    // TODO is it safe to assume we only get called her by the leader?
+    let n = raft_node.median_match_index_value(); // called n per the raft paper.
+    let term_of_n = raft_node.log.lock().unwrap().get(n).unwrap().term;
+    let should_advance_commit_index = n > raft_node.commit_index.load(Ordering::SeqCst)
+        && term_of_n == raft_node.current_term.load(Ordering::SeqCst);
+    if should_advance_commit_index {
+        raft_node.commit_index.store(n, Ordering::SeqCst);
+        tracing::debug!("advanced commit index to: {n}");
+    }
+    advance_state_machine(event_tx, raft_node).await;
+}
+
+async fn advance_state_machine(
+    event_tx: tokio::sync::mpsc::Sender<Event>,
+    raft_node: Arc<RaftNode>,
+) {
+    while raft_node.last_applied.load(Ordering::SeqCst)
+        < raft_node.commit_index.load(Ordering::SeqCst)
+    {
+        raft_node.last_applied.fetch_add(1, Ordering::SeqCst);
+        let Some(op) = raft_node
+            .log
+            .lock()
+            .unwrap()
+            .get(raft_node.last_applied.load(Ordering::SeqCst))
+            .unwrap()
+            .op
+            .clone()
+        else {
+            panic!("tried to advance the state machine using a None op");
+        };
+
+        tracing::debug!("applying op: {:?} to state machine", op);
+        apply_to_state_machine(event_tx.clone(), raft_node.clone(), op).await;
+
+        // TODO review when responses should be sent upon applying entries
+    }
+}
+
 async fn replicate_log(
     event_tx: tokio::sync::mpsc::Sender<Event>,
     reset_election_deadline_tx: tokio::sync::mpsc::Sender<()>,
@@ -868,27 +909,29 @@ async fn replicate_log(
                 )
                 .await;
                 if success {
-                    let mut next_index_guard = raft_node.next_index.lock().unwrap();
-                    let updated_next_index_entry = max(
-                        *next_index_guard.get(&node).unwrap_or(&0),
-                        next_index_to_send + entries.len(),
-                    );
-                    next_index_guard.insert(node.clone(), updated_next_index_entry);
-                    std::mem::drop(next_index_guard);
+                    {
+                        let mut next_index_guard = raft_node.next_index.lock().unwrap();
+                        let updated_next_index_entry = max(
+                            *next_index_guard.get(&node).unwrap_or(&0),
+                            next_index_to_send + entries.len(),
+                        );
+                        next_index_guard.insert(node.clone(), updated_next_index_entry);
+                    }
 
-                    let mut match_index_guard = raft_node.match_index.lock().unwrap();
-                    let updated_match_index_entry = max(
-                        *match_index_guard.get(&node).unwrap_or(&0),
-                        next_index_to_send + entries.len() - 1,
-                    );
-                    match_index_guard.insert(node.clone(), updated_match_index_entry);
-                    std::mem::drop(match_index_guard);
+                    {
+                        let mut match_index_guard = raft_node.match_index.lock().unwrap();
+                        let updated_match_index_entry = max(
+                            *match_index_guard.get(&node).unwrap_or(&0),
+                            next_index_to_send + entries.len() - 1,
+                        );
+                        match_index_guard.insert(node.clone(), updated_match_index_entry);
+                    }
 
                     tracing::debug!(
                         "successfully replicated to {node}. Next index: {:?}",
                         raft_node.next_index.lock().unwrap()
                     );
-                    raft_node.advance_commit_index();
+                    advance_commit_index(event_tx.clone(), raft_node.clone()).await;
                 } else {
                     // replication request was rejected. We can infer it's due to an index mismatch, so we decrement
                     // the next index to send (for the future re-attempt of replication).
